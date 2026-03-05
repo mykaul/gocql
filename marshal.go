@@ -31,6 +31,7 @@ import (
 	"math"
 	"math/bits"
 	"reflect"
+	"sync"
 	"unsafe"
 
 	"github.com/gocql/gocql/serialization/ascii"
@@ -63,6 +64,51 @@ var (
 var (
 	ErrorUDTUnavailable = errors.New("UDT are not available on protocols less than 3, please update config")
 )
+
+// udtFieldCache caches the mapping from CQL field names to struct field indices
+// for UDT marshal/unmarshal. The key is a reflect.Type (always a struct type),
+// and the value is a map[string]int mapping field names to field indices.
+//
+// For tagged fields (e.g. `cql:"col_name"`), the tag value is used as the key.
+// For untagged exported fields, the Go field name is used as the key.
+// Tagged names take priority over Go field names.
+var udtFieldCache sync.Map // reflect.Type → map[string]int
+
+// udtFields returns a cached mapping of CQL field names to struct field indices
+// for the given struct type. It first maps fields by their `cql` struct tag,
+// then adds any remaining exported fields by their Go name (without overwriting
+// tagged entries). The result is cached for subsequent calls with the same type.
+func udtFields(t reflect.Type) map[string]int {
+	if cached, ok := udtFieldCache.Load(t); ok {
+		return cached.(map[string]int)
+	}
+
+	n := t.NumField()
+	fields := make(map[string]int, n)
+
+	// First pass: map untagged exported fields by Go name.
+	for i := 0; i < n; i++ {
+		sf := t.Field(i)
+		if sf.IsExported() {
+			fields[sf.Name] = i
+		}
+	}
+
+	// Second pass: override with tagged fields (tags take priority).
+	// Unexported fields are skipped for the same reason as the first pass.
+	for i := 0; i < n; i++ {
+		sf := t.Field(i)
+		if !sf.IsExported() {
+			continue
+		}
+		if tag := sf.Tag.Get("cql"); tag != "" {
+			fields[tag] = i
+		}
+	}
+
+	udtFieldCache.Store(t, fields)
+	return fields
+}
 
 // Marshaler is an interface for custom unmarshaler.
 // Each value of the 'CQL binary protocol' consist of <value_len> and <value_data>.
@@ -1523,21 +1569,14 @@ func marshalUDT(info TypeInfo, value interface{}) ([]byte, error) {
 		return nil, marshalErrorf("cannot marshal %T into %s", value, info)
 	}
 
-	fields := make(map[string]reflect.Value)
-	t := reflect.TypeOf(value)
-	for i := 0; i < t.NumField(); i++ {
-		sf := t.Field(i)
-
-		if tag := sf.Tag.Get("cql"); tag != "" {
-			fields[tag] = k.Field(i)
-		}
-	}
+	fields := udtFields(k.Type())
 
 	var buf []byte
 	for _, e := range udt.Elements {
-		f, ok := fields[e.Name]
-		if !ok {
-			f = k.FieldByName(e.Name)
+		idx, ok := fields[e.Name]
+		var f reflect.Value
+		if ok {
+			f = k.Field(idx)
 		}
 
 		var data []byte
@@ -1643,15 +1682,7 @@ func unmarshalUDT(info TypeInfo, data []byte, value interface{}) error {
 		return nil
 	}
 
-	t := k.Type()
-	fields := make(map[string]reflect.Value, t.NumField())
-	for i := 0; i < t.NumField(); i++ {
-		sf := t.Field(i)
-
-		if tag := sf.Tag.Get("cql"); tag != "" {
-			fields[tag] = k.Field(i)
-		}
-	}
+	fields := udtFields(k.Type())
 
 	udt := info.(UDTTypeInfo)
 	for id, e := range udt.Elements {
@@ -1666,15 +1697,13 @@ func unmarshalUDT(info TypeInfo, data []byte, value interface{}) error {
 		var p []byte
 		p, data = readBytes(data)
 
-		f, ok := fields[e.Name]
+		idx, ok := fields[e.Name]
 		if !ok {
-			f = k.FieldByName(e.Name)
-			if f == emptyValue { //nolint:govet // no other way to do that
-				// skip fields which exist in the UDT but not in
-				// the struct passed in
-				continue
-			}
+			// skip fields which exist in the UDT but not in
+			// the struct passed in
+			continue
 		}
+		f := k.Field(idx)
 
 		if !f.IsValid() || !f.CanAddr() {
 			return unmarshalErrorf("cannot unmarshal %s into %T: field %v is not valid", info, value, e.Name)
