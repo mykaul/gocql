@@ -81,34 +81,57 @@ func asVectorType(t TypeInfo) (VectorType, bool) {
 	}, true
 }
 
+// Cached reflect.Type values for CQL types.
+// These are computed once at package initialization to avoid repeated
+// reflect.TypeOf calls on every goType() invocation.
+var (
+	goTypeString      = reflect.TypeOf("")
+	goTypeInt64       = reflect.TypeOf(int64(0))
+	goTypeDuration    = reflect.TypeOf(time.Duration(0))
+	goTypeTime        = reflect.TypeOf(time.Time{})
+	goTypeByteSlice   = reflect.TypeOf([]byte(nil))
+	goTypeBool        = reflect.TypeOf(false)
+	goTypeFloat32     = reflect.TypeOf(float32(0))
+	goTypeFloat64     = reflect.TypeOf(float64(0))
+	goTypeInt         = reflect.TypeOf(int(0))
+	goTypeInt16       = reflect.TypeOf(int16(0))
+	goTypeInt8        = reflect.TypeOf(int8(0))
+	goTypeInfDec      = reflect.TypeOf((*inf.Dec)(nil))
+	goTypeUUID        = reflect.TypeOf(UUID{})
+	goTypeBigInt      = reflect.TypeOf((*big.Int)(nil))
+	goTypeIfaceSlice  = reflect.TypeOf([]interface{}(nil))
+	goTypeIfaceMap    = reflect.TypeOf(map[string]interface{}(nil))
+	goTypeCqlDuration = reflect.TypeOf(Duration{})
+)
+
 func goType(t TypeInfo) (reflect.Type, error) {
 	switch t.Type() {
 	case TypeVarchar, TypeAscii, TypeInet, TypeText:
-		return reflect.TypeOf(*new(string)), nil
+		return goTypeString, nil
 	case TypeBigInt, TypeCounter:
-		return reflect.TypeOf(*new(int64)), nil
+		return goTypeInt64, nil
 	case TypeTime:
-		return reflect.TypeOf(*new(time.Duration)), nil
+		return goTypeDuration, nil
 	case TypeTimestamp:
-		return reflect.TypeOf(*new(time.Time)), nil
+		return goTypeTime, nil
 	case TypeBlob:
-		return reflect.TypeOf(*new([]byte)), nil
+		return goTypeByteSlice, nil
 	case TypeBoolean:
-		return reflect.TypeOf(*new(bool)), nil
+		return goTypeBool, nil
 	case TypeFloat:
-		return reflect.TypeOf(*new(float32)), nil
+		return goTypeFloat32, nil
 	case TypeDouble:
-		return reflect.TypeOf(*new(float64)), nil
+		return goTypeFloat64, nil
 	case TypeInt:
-		return reflect.TypeOf(*new(int)), nil
+		return goTypeInt, nil
 	case TypeSmallInt:
-		return reflect.TypeOf(*new(int16)), nil
+		return goTypeInt16, nil
 	case TypeTinyInt:
-		return reflect.TypeOf(*new(int8)), nil
+		return goTypeInt8, nil
 	case TypeDecimal:
-		return reflect.TypeOf(*new(*inf.Dec)), nil
+		return goTypeInfDec, nil
 	case TypeUUID, TypeTimeUUID:
-		return reflect.TypeOf(*new(UUID)), nil
+		return goTypeUUID, nil
 	case TypeList, TypeSet:
 		elemType, err := goType(t.(CollectionType).Elem)
 		if err != nil {
@@ -126,17 +149,15 @@ func goType(t TypeInfo) (reflect.Type, error) {
 		}
 		return reflect.MapOf(keyType, valueType), nil
 	case TypeVarint:
-		return reflect.TypeOf(*new(*big.Int)), nil
+		return goTypeBigInt, nil
 	case TypeTuple:
-		// what can we do here? all there is to do is to make a list of interface{}
-		tuple := t.(TupleTypeInfo)
-		return reflect.TypeOf(make([]interface{}, len(tuple.Elems))), nil
+		return goTypeIfaceSlice, nil
 	case TypeUDT:
-		return reflect.TypeOf(make(map[string]interface{})), nil
+		return goTypeIfaceMap, nil
 	case TypeDate:
-		return reflect.TypeOf(*new(time.Time)), nil
+		return goTypeTime, nil
 	case TypeDuration:
-		return reflect.TypeOf(*new(Duration)), nil
+		return goTypeCqlDuration, nil
 	case TypeCustom:
 		// Handle VectorType encoded as custom
 		if vec, ok := asVectorType(t); ok {
