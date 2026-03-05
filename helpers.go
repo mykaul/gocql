@@ -396,37 +396,71 @@ func (iter *Iter) RowData() (RowData, error) {
 		return RowData{}, iter.err
 	}
 
-	columns := make([]string, 0, len(iter.Columns()))
-	values := make([]interface{}, 0, len(iter.Columns()))
+	columns, err := iter.getScanColumns()
+	if err != nil {
+		return RowData{}, err
+	}
 
+	values, err := iter.newScanValues()
+	if err != nil {
+		return RowData{}, err
+	}
+
+	return RowData{
+		Columns: columns,
+		Values:  values,
+	}, nil
+}
+
+// getScanColumns returns the cached column names for this iterator,
+// computing them on the first call. Column names don't change between
+// rows, so they are computed once and reused.
+//
+// The returned slice is shared across all callers and must not be mutated.
+func (iter *Iter) getScanColumns() ([]string, error) {
+	if iter.scanColumns != nil {
+		return iter.scanColumns, nil
+	}
+
+	columns := make([]string, 0, len(iter.Columns()))
+	for _, column := range iter.Columns() {
+		if c, ok := column.TypeInfo.(TupleTypeInfo); !ok {
+			columns = append(columns, column.Name)
+		} else {
+			for i := range c.Elems {
+				columns = append(columns, TupleColumnName(column.Name, i))
+			}
+		}
+	}
+
+	iter.scanColumns = columns
+	return columns, nil
+}
+
+// newScanValues allocates fresh zero-value pointers for each column,
+// suitable for passing to Scan.
+func (iter *Iter) newScanValues() ([]interface{}, error) {
+	values := make([]interface{}, 0, len(iter.Columns()))
 	for _, column := range iter.Columns() {
 		if c, ok := column.TypeInfo.(TupleTypeInfo); !ok {
 			val, err := column.TypeInfo.NewWithError()
 			if err != nil {
 				iter.err = err
-				return RowData{}, err
+				return nil, err
 			}
-			columns = append(columns, column.Name)
 			values = append(values, val)
 		} else {
-			for i, elem := range c.Elems {
-				columns = append(columns, TupleColumnName(column.Name, i))
+			for _, elem := range c.Elems {
 				val, err := elem.NewWithError()
 				if err != nil {
 					iter.err = err
-					return RowData{}, err
+					return nil, err
 				}
 				values = append(values, val)
 			}
 		}
 	}
-
-	rowData := RowData{
-		Columns: columns,
-		Values:  values,
-	}
-
-	return rowData, nil
+	return values, nil
 }
 
 // TODO(zariel): is it worth exporting this?

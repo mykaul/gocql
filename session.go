@@ -1746,6 +1746,11 @@ type Iter struct {
 	pos     int
 	numRows int
 	closed  int32
+
+	// scanColumns caches the column names computed by RowData() so that
+	// MapScan does not recompute them on every row. It is populated lazily
+	// on the first call to RowData().
+	scanColumns []string
 }
 
 // Host returns the host which the query was sent to.
