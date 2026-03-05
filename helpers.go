@@ -269,12 +269,21 @@ func splitJavaCompositeTypes(name string, typeName string) []string {
 }
 
 func unwrapCompositeTypeDefinition(name string, typeName string, typeOpen int32) string {
-	return strings.TrimPrefix(name[:len(name)-1], typeName+string(typeOpen))
+	// Strip trailing close delimiter and the "typeName(" prefix.
+	// Note: typeOpen is assumed to be a single-byte ASCII character (e.g. '('),
+	// which is true for all current callers. Multi-byte runes would require
+	// utf8.RuneLen(typeOpen) instead of the +1 below.
+	inner := name[:len(name)-1]
+	prefixLen := len(typeName) + 1 // +1 for typeOpen (single-byte ASCII)
+	if len(inner) >= prefixLen {
+		inner = inner[prefixLen:]
+	}
+	return inner
 }
 
 func splitCompositeTypes(name string, typeName string, typeOpen int32, typeClose int32) []string {
 	def := unwrapCompositeTypeDefinition(name, typeName, typeOpen)
-	if !strings.Contains(def, string(typeOpen)) {
+	if !strings.ContainsRune(def, typeOpen) {
 		parts := strings.Split(def, ",")
 		for i := range parts {
 			parts[i] = strings.TrimSpace(parts[i])
@@ -283,24 +292,23 @@ func splitCompositeTypes(name string, typeName string, typeOpen int32, typeClose
 	}
 	var parts []string
 	lessCount := 0
-	segment := ""
-	for _, char := range def {
+	start := 0
+	for i, char := range def {
 		if char == ',' && lessCount == 0 {
-			if segment != "" {
-				parts = append(parts, strings.TrimSpace(segment))
+			if i > start {
+				parts = append(parts, strings.TrimSpace(def[start:i]))
 			}
-			segment = ""
+			start = i + 1 // skip the comma (1 byte)
 			continue
 		}
-		segment += string(char)
 		if char == typeOpen {
 			lessCount++
 		} else if char == typeClose {
 			lessCount--
 		}
 	}
-	if segment != "" {
-		parts = append(parts, strings.TrimSpace(segment))
+	if start < len(def) {
+		parts = append(parts, strings.TrimSpace(def[start:]))
 	}
 	return parts
 }
