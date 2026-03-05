@@ -31,6 +31,7 @@ import (
 	"math"
 	"math/bits"
 	"reflect"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -1769,7 +1770,7 @@ func (t NativeType) Custom() string {
 func (t NativeType) String() string {
 	switch t.typ {
 	case TypeCustom:
-		return fmt.Sprintf("%s(%s)", t.typ, t.custom)
+		return t.typ.String() + "(" + t.custom + ")"
 	default:
 		return t.typ.String()
 	}
@@ -1814,14 +1815,43 @@ func (t CollectionType) NewWithError() (interface{}, error) {
 	return reflect.New(typ).Interface(), nil
 }
 
+// typeInfoString returns the string representation of a TypeInfo value.
+// All TypeInfo implementations (NativeType, CollectionType, TupleTypeInfo,
+// UDTTypeInfo) implement fmt.Stringer, so this avoids fmt.Sprint overhead.
+func typeInfoString(ti TypeInfo) string {
+	if s, ok := ti.(fmt.Stringer); ok {
+		return s.String()
+	}
+	return fmt.Sprint(ti)
+}
+
 func (t CollectionType) String() string {
 	switch t.typ {
 	case TypeMap:
-		return fmt.Sprintf("%s(%s, %s)", t.typ, t.Key, t.Elem)
+		var b strings.Builder
+		typStr := t.typ.String()
+		keyStr := typeInfoString(t.Key)
+		elemStr := typeInfoString(t.Elem)
+		b.Grow(len(typStr) + 1 + len(keyStr) + 2 + len(elemStr) + 1)
+		b.WriteString(typStr)
+		b.WriteByte('(')
+		b.WriteString(keyStr)
+		b.WriteString(", ")
+		b.WriteString(elemStr)
+		b.WriteByte(')')
+		return b.String()
 	case TypeList, TypeSet:
-		return fmt.Sprintf("%s(%s)", t.typ, t.Elem)
+		var b strings.Builder
+		typStr := t.typ.String()
+		elemStr := typeInfoString(t.Elem)
+		b.Grow(len(typStr) + 1 + len(elemStr) + 1)
+		b.WriteString(typStr)
+		b.WriteByte('(')
+		b.WriteString(elemStr)
+		b.WriteByte(')')
+		return b.String()
 	case TypeCustom:
-		return fmt.Sprintf("%s(%s)", t.typ, t.custom)
+		return t.typ.String() + "(" + t.custom + ")"
 	default:
 		return t.typ.String()
 	}
@@ -1840,14 +1870,17 @@ type TupleTypeInfo struct {
 }
 
 func (t TupleTypeInfo) String() string {
-	var buf bytes.Buffer
-	buf.WriteString(fmt.Sprintf("%s(", t.typ))
-	for _, elem := range t.Elems {
-		buf.WriteString(fmt.Sprintf("%s, ", elem))
+	var sb strings.Builder
+	sb.WriteString(t.typ.String())
+	sb.WriteByte('(')
+	for i, elem := range t.Elems {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(typeInfoString(elem))
 	}
-	buf.Truncate(buf.Len() - 2)
-	buf.WriteByte(')')
-	return buf.String()
+	sb.WriteByte(')')
+	return sb.String()
 }
 
 func (t TupleTypeInfo) NewWithError() (interface{}, error) {
@@ -1888,22 +1921,21 @@ func (t UDTTypeInfo) NewWithError() (interface{}, error) {
 }
 
 func (t UDTTypeInfo) String() string {
-	buf := &bytes.Buffer{}
-
-	fmt.Fprintf(buf, "%s.%s{", t.KeySpace, t.Name)
-	first := true
-	for _, e := range t.Elements {
-		if !first {
-			fmt.Fprint(buf, ",")
-		} else {
-			first = false
+	var sb strings.Builder
+	sb.WriteString(t.KeySpace)
+	sb.WriteByte('.')
+	sb.WriteString(t.Name)
+	sb.WriteByte('{')
+	for i, e := range t.Elements {
+		if i > 0 {
+			sb.WriteByte(',')
 		}
-
-		fmt.Fprintf(buf, "%s=%v", e.Name, e.Type)
+		sb.WriteString(e.Name)
+		sb.WriteByte('=')
+		sb.WriteString(typeInfoString(e.Type))
 	}
-	fmt.Fprint(buf, "}")
-
-	return buf.String()
+	sb.WriteByte('}')
+	return sb.String()
 }
 
 // String returns a human readable name for the Cassandra datatype
