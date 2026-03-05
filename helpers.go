@@ -387,7 +387,7 @@ func (r *RowData) rowMap(m map[string]interface{}) {
 // c at index n. It should be used if a specific element within a tuple is needed
 // to be extracted from a map returned from SliceMap or MapScan.
 func TupleColumnName(c string, n int) string {
-	return fmt.Sprintf("%s[%d]", c, n)
+	return c + "[" + strconv.Itoa(n) + "]"
 }
 
 // RowData returns the RowData for the iterator.
