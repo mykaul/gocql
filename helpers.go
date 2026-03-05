@@ -52,11 +52,11 @@ func asVectorType(t TypeInfo) (VectorType, bool) {
 		return VectorType{}, false
 	}
 	const vectorTypePrefix = apacheCassandraTypePrefix + "VectorType"
-	if !strings.HasPrefix(n.Custom(), vectorTypePrefix+"(") {
+	spec, ok2 := strings.CutPrefix(n.Custom(), vectorTypePrefix)
+	if !ok2 || !strings.HasPrefix(spec, "(") {
 		return VectorType{}, false
 	}
 
-	spec := strings.TrimPrefix(n.Custom(), vectorTypePrefix)
 	spec = strings.Trim(spec, "()")
 	// split last comma -> subtype spec , dimensions
 	idx := strings.LastIndex(spec, ",")
