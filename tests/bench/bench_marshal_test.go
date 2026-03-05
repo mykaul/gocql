@@ -62,6 +62,7 @@ func BenchmarkSerialization(b *testing.B) {
 			tType := gocql.NewNativeType(4, gocql.TypeInt)
 			var val int = 42
 			b.Run("Marshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					_, err := gocql.Marshal(tType, val)
 					if err != nil {
@@ -74,6 +75,7 @@ func BenchmarkSerialization(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Run("Unmarshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					var unmarshaled int
 					err = gocql.Unmarshal(tType, marshaled, &unmarshaled)
@@ -98,6 +100,7 @@ func BenchmarkSerialization(b *testing.B) {
 				tType := gocql.NewNativeType(4, gocql.TypeBlob)
 				val := generateRandomBinaryData(c.size)
 				b.Run("Marshal", func(b *testing.B) {
+					b.ReportAllocs()
 					for i := 0; i < b.N; i++ {
 						_, err := gocql.Marshal(tType, val)
 						if err != nil {
@@ -110,6 +113,7 @@ func BenchmarkSerialization(b *testing.B) {
 					b.Fatal(err)
 				}
 				b.Run("Unmarshal", func(b *testing.B) {
+					b.ReportAllocs()
 					for i := 0; i < b.N; i++ {
 						var unmarshaled []byte
 						err = gocql.Unmarshal(tType, marshaled, &unmarshaled)
@@ -126,6 +130,7 @@ func BenchmarkSerialization(b *testing.B) {
 				tType := gocql.NewNativeType(4, gocql.TypeText)
 				val := generateRandomJSON(c.size)
 				b.Run("Marshal", func(b *testing.B) {
+					b.ReportAllocs()
 					for i := 0; i < b.N; i++ {
 						_, err := gocql.Marshal(tType, val)
 						if err != nil {
@@ -138,6 +143,7 @@ func BenchmarkSerialization(b *testing.B) {
 					b.Fatal(err)
 				}
 				b.Run("Unmarshal", func(b *testing.B) {
+					b.ReportAllocs()
 					for i := 0; i < b.N; i++ {
 						var unmarshaled string
 						err = gocql.Unmarshal(tType, marshaled, &unmarshaled)
@@ -153,6 +159,7 @@ func BenchmarkSerialization(b *testing.B) {
 			tType := gocql.NewNativeType(4, gocql.TypeUUID)
 			val := gocql.UUID{}
 			b.Run("Marshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					_, err := gocql.Marshal(tType, val)
 					if err != nil {
@@ -165,6 +172,7 @@ func BenchmarkSerialization(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Run("Unmarshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					var unmarshaled gocql.UUID
 					err = gocql.Unmarshal(tType, marshaled, &unmarshaled)
@@ -179,6 +187,7 @@ func BenchmarkSerialization(b *testing.B) {
 			tType := gocql.NewNativeType(4, gocql.TypeDuration)
 			val := gocql.Duration{Nanoseconds: 300000000000}
 			b.Run("Marshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					_, err := gocql.Marshal(tType, val)
 					if err != nil {
@@ -191,6 +200,7 @@ func BenchmarkSerialization(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Run("Unmarshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					var unmarshaled gocql.Duration
 					err = gocql.Unmarshal(tType, marshaled, &unmarshaled)
@@ -205,6 +215,7 @@ func BenchmarkSerialization(b *testing.B) {
 			tType := gocql.NewNativeType(4, gocql.TypeTimestamp)
 			val := time.Now()
 			b.Run("Marshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					_, err := gocql.Marshal(tType, val)
 					if err != nil {
@@ -217,6 +228,7 @@ func BenchmarkSerialization(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Run("Unmarshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					var unmarshaled time.Time
 					err = gocql.Unmarshal(tType, marshaled, &unmarshaled)
@@ -236,6 +248,7 @@ func BenchmarkSerialization(b *testing.B) {
 			}
 			val := []string{"foo", "bar", "baz"}
 			b.Run("Marshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					_, err := gocql.Marshal(tType, val)
 					if err != nil {
@@ -248,6 +261,7 @@ func BenchmarkSerialization(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Run("Unmarshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					var unmarshaled []string
 					err = gocql.Unmarshal(tType, marshaled, &unmarshaled)
@@ -266,6 +280,7 @@ func BenchmarkSerialization(b *testing.B) {
 			}
 			val := map[string]int{"a": 1, "b": 2}
 			b.Run("Marshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					_, err := gocql.Marshal(tType, val)
 					if err != nil {
@@ -278,6 +293,7 @@ func BenchmarkSerialization(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Run("Unmarshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					var unmarshaled map[string]int
 					err = gocql.Unmarshal(tType, marshaled, &unmarshaled)
@@ -295,6 +311,7 @@ func BenchmarkSerialization(b *testing.B) {
 			}
 			val := map[int]struct{}{1: {}, 2: {}}
 			b.Run("Marshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					_, err := gocql.Marshal(tType, val)
 					if err != nil {
@@ -307,6 +324,7 @@ func BenchmarkSerialization(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Run("Unmarshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					var unmarshaled []int
 					err = gocql.Unmarshal(tType, marshaled, &unmarshaled)
@@ -351,6 +369,7 @@ func BenchmarkSerialization(b *testing.B) {
 			}
 
 			b.Run("Marshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					_, err := gocql.Marshal(tType, val)
 					if err != nil {
@@ -363,6 +382,7 @@ func BenchmarkSerialization(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Run("Unmarshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					var unmarshaled MyUDT
 					err = gocql.Unmarshal(tType, marshaled, &unmarshaled)
@@ -390,6 +410,7 @@ func BenchmarkSerialization(b *testing.B) {
 				},
 			}
 			b.Run("Marshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					_, err := gocql.Marshal(tType, val)
 					if err != nil {
@@ -402,6 +423,7 @@ func BenchmarkSerialization(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Run("Unmarshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					var unmarshaled struct {
 						Field1 int
@@ -462,6 +484,7 @@ func BenchmarkSerialization(b *testing.B) {
 			}
 
 			b.Run("Marshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					_, err := gocql.Marshal(tType, val)
 					if err != nil {
@@ -474,6 +497,7 @@ func BenchmarkSerialization(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Run("Unmarshal", func(b *testing.B) {
+				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					var unmarshaled []map[string]MyUDT
 					err = gocql.Unmarshal(tType, marshaled, &unmarshaled)
