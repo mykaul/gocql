@@ -178,7 +178,48 @@ func goType(t TypeInfo) (reflect.Type, error) {
 }
 
 func dereference(i interface{}) interface{} {
-	return reflect.Indirect(reflect.ValueOf(i)).Interface()
+	// Fast path: avoid reflect for the common pointer types returned by
+	// NativeType.NewWithError and used in RowData/MapScan.
+	switch v := i.(type) {
+	case *string:
+		return *v
+	case *int:
+		return *v
+	case *int64:
+		return *v
+	case *int32:
+		return *v
+	case *int16:
+		return *v
+	case *int8:
+		return *v
+	case *float64:
+		return *v
+	case *float32:
+		return *v
+	case *bool:
+		return *v
+	case *[]byte:
+		return *v
+	case *time.Time:
+		return *v
+	case *time.Duration:
+		return *v
+	case *UUID:
+		return *v
+	case *Duration:
+		return *v
+	case *inf.Dec:
+		return *v
+	case *big.Int:
+		return *v
+	case *[]interface{}:
+		return *v
+	case *map[string]interface{}:
+		return *v
+	default:
+		return reflect.Indirect(reflect.ValueOf(i)).Interface()
+	}
 }
 
 // TODO: Cover with unit tests.
