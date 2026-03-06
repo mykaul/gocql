@@ -66,44 +66,54 @@ var (
 	ErrorUDTUnavailable = errors.New("UDT are not available on protocols less than 3, please update config")
 )
 
-// udtFieldCache caches the mapping from CQL field names to struct field indices
-// for UDT marshal/unmarshal. The key is a reflect.Type (always a struct type),
-// and the value is a map[string]int mapping field names to field indices.
+// udtFieldCache caches the mapping from CQL field names to struct field
+// index paths for UDT marshal/unmarshal. The key is a reflect.Type (always
+// a struct type), and the value is a map[string][]int mapping field names
+// to field index paths (as used by reflect.Value.FieldByIndex).
 //
 // For tagged fields (e.g. `cql:"col_name"`), the tag value is used as the key.
-// For untagged exported fields, the Go field name is used as the key.
-// Tagged names take priority over Go field names.
-var udtFieldCache sync.Map // reflect.Type → map[string]int
+// For untagged exported fields (including those in embedded structs), the Go
+// field name is used as the key. Tagged names take priority over Go field names.
+var udtFieldCache sync.Map // reflect.Type → map[string][]int
 
-// udtFields returns a cached mapping of CQL field names to struct field indices
-// for the given struct type. It first maps fields by their `cql` struct tag,
-// then adds any remaining exported fields by their Go name (without overwriting
-// tagged entries). The result is cached for subsequent calls with the same type.
-func udtFields(t reflect.Type) map[string]int {
+// udtFields returns a cached mapping of CQL field names to struct field index
+// paths for the given struct type. It uses reflect.Type.FieldByName to resolve
+// each visible exported field (including those promoted from embedded structs),
+// matching the behavior of the pre-cache reflect.Value.FieldByName fallback.
+// Fields with a `cql` struct tag use the tag value as the key; untagged exported
+// fields use their Go name. Tagged names take priority over Go field names.
+// The result is cached for subsequent calls with the same type.
+// Callers must not mutate the returned map or its slice values.
+func udtFields(t reflect.Type) map[string][]int {
 	if cached, ok := udtFieldCache.Load(t); ok {
-		return cached.(map[string]int)
+		return cached.(map[string][]int)
 	}
 
-	n := t.NumField()
-	fields := make(map[string]int, n)
+	fields := make(map[string][]int)
 
-	// First pass: map untagged exported fields by Go name.
-	for i := 0; i < n; i++ {
-		sf := t.Field(i)
-		if sf.IsExported() {
-			fields[sf.Name] = i
+	// Collect all visible fields (including promoted fields from embedded
+	// structs) using reflect.VisibleFields, which returns the same set of
+	// fields that FieldByName can resolve.
+	visible := reflect.VisibleFields(t)
+
+	// First: map all exported non-anonymous fields by Go name.
+	for _, sf := range visible {
+		if !sf.IsExported() || sf.Anonymous {
+			continue
 		}
+		fields[sf.Name] = sf.Index
 	}
 
-	// Second pass: override with tagged fields (tags take priority).
-	// Unexported fields are skipped for the same reason as the first pass.
-	for i := 0; i < n; i++ {
-		sf := t.Field(i)
-		if !sf.IsExported() {
+	// Second: override with cql tags. Tags take priority over Go names,
+	// so a tagged field A with `cql:"B"` will override the Go-name
+	// mapping for an untagged field B. This must be a separate pass to
+	// guarantee tag priority regardless of field declaration order.
+	for _, sf := range visible {
+		if !sf.IsExported() || sf.Anonymous {
 			continue
 		}
 		if tag := sf.Tag.Get("cql"); tag != "" {
-			fields[tag] = i
+			fields[tag] = sf.Index
 		}
 	}
 
@@ -1577,7 +1587,7 @@ func marshalUDT(info TypeInfo, value interface{}) ([]byte, error) {
 		idx, ok := fields[e.Name]
 		var f reflect.Value
 		if ok {
-			f = k.Field(idx)
+			f = k.FieldByIndex(idx)
 		}
 
 		var data []byte
@@ -1704,7 +1714,7 @@ func unmarshalUDT(info TypeInfo, data []byte, value interface{}) error {
 			// the struct passed in
 			continue
 		}
-		f := k.Field(idx)
+		f := k.FieldByIndex(idx)
 
 		if !f.IsValid() || !f.CanAddr() {
 			return unmarshalErrorf("cannot unmarshal %s into %T: field %v is not valid", info, value, e.Name)
