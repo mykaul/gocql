@@ -29,11 +29,15 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"math/bits"
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
+
+	"gopkg.in/inf.v0"
 
 	"github.com/gocql/gocql/serialization/ascii"
 	"github.com/gocql/gocql/serialization/bigint"
@@ -1758,6 +1762,47 @@ func NewCustomType(proto byte, typ Type, custom string) NativeType {
 }
 
 func (t NativeType) NewWithError() (interface{}, error) {
+	// Fast path: avoid reflect.New for common scalar types by returning
+	// concrete pointers directly. This eliminates one reflect.New call
+	// per column per row on the RowData/MapScan hot path.
+	switch t.typ {
+	case TypeVarchar, TypeAscii, TypeInet, TypeText:
+		return new(string), nil
+	case TypeBigInt, TypeCounter:
+		return new(int64), nil
+	case TypeTime:
+		return new(time.Duration), nil
+	case TypeTimestamp, TypeDate:
+		return new(time.Time), nil
+	case TypeBlob:
+		return new([]byte), nil
+	case TypeBoolean:
+		return new(bool), nil
+	case TypeFloat:
+		return new(float32), nil
+	case TypeDouble:
+		return new(float64), nil
+	case TypeInt:
+		return new(int), nil
+	case TypeSmallInt:
+		return new(int16), nil
+	case TypeTinyInt:
+		return new(int8), nil
+	case TypeDecimal:
+		return new(inf.Dec), nil
+	case TypeUUID, TypeTimeUUID:
+		return new(UUID), nil
+	case TypeVarint:
+		return new(big.Int), nil
+	case TypeTuple:
+		return new([]interface{}), nil
+	case TypeUDT:
+		return new(map[string]interface{}), nil
+	case TypeDuration:
+		return new(Duration), nil
+	}
+	// Slow path for dynamic types (TypeCustom with vector encoding,
+	// or any future types) that require reflect.
 	typ, err := goType(t)
 	if err != nil {
 		return nil, err
