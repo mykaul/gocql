@@ -1789,11 +1789,15 @@ func (t NativeType) NewWithError() (interface{}, error) {
 	case TypeTinyInt:
 		return new(int8), nil
 	case TypeDecimal:
-		return new(inf.Dec), nil
+		// goType returns *inf.Dec (pointer type), so reflect.New would
+		// produce **inf.Dec. Match that by returning new(*inf.Dec).
+		return new(*inf.Dec), nil
 	case TypeUUID, TypeTimeUUID:
 		return new(UUID), nil
 	case TypeVarint:
-		return new(big.Int), nil
+		// goType returns *big.Int (pointer type), so reflect.New would
+		// produce **big.Int. Match that by returning new(*big.Int).
+		return new(*big.Int), nil
 	case TypeTuple:
 		return new([]interface{}), nil
 	case TypeUDT:

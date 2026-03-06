@@ -209,9 +209,9 @@ func dereference(i interface{}) interface{} {
 		return *v
 	case *Duration:
 		return *v
-	case *inf.Dec:
+	case **inf.Dec:
 		return *v
-	case *big.Int:
+	case **big.Int:
 		return *v
 	case *[]interface{}:
 		return *v
