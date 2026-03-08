@@ -1738,7 +1738,7 @@ func (c *Conn) executeQuery(ctx context.Context, qry *Query) (iter *Iter) {
 			return &Iter{err: fmt.Errorf("gocql: expected %d values send got %d", info.request.actualColCount, len(values))}
 		}
 
-		params.values = make([]queryValues, len(values))
+		params.values = getQueryValues(len(values))
 
 		// Return pooled marshal output buffers after the framer copies
 		// them (which happens inside c.exec → buildFrame → writeBytes).
@@ -1772,6 +1772,7 @@ func (c *Conn) executeQuery(ctx context.Context, qry *Query) (iter *Iter) {
 			value := values[i]
 			typ := info.request.columns[i].TypeInfo
 			if err := marshalQueryValue(typ, value, v); err != nil {
+				putQueryValues(params.values)
 				return &Iter{err: err}
 			}
 		}
@@ -1800,6 +1801,9 @@ func (c *Conn) executeQuery(ctx context.Context, qry *Query) (iter *Iter) {
 	}
 
 	framer, err := c.exec(ctx, frame, qry.trace, qry.GetRequestTimeout())
+	// Return pooled values; consumed by buildFrame at the start of c.exec().
+	// Returned after round-trip (not right after serialization) for simplicity.
+	putQueryValues(params.values)
 	if err != nil {
 		return &Iter{err: err}
 	}
@@ -2056,6 +2060,7 @@ func (c *Conn) executeBatchOnce(ctx context.Context, batch *Batch) *Iter {
 				PKeyColumns: info.request.pkeyColumns,
 			})
 			if err != nil {
+				putBatchQueryValues(req.statements)
 				return &Iter{err: err}
 			}
 		} else {
@@ -2115,6 +2120,9 @@ func (c *Conn) executeBatchOnce(ctx context.Context, batch *Batch) *Iter {
 
 	// TODO: should batch support tracing?
 	framer, err := c.exec(ctx, req, batch.trace, batch.GetRequestTimeout())
+	// Return pooled values; consumed by buildFrame at the start of c.exec().
+	// Returned after round-trip (not right after serialization) for simplicity.
+	putBatchQueryValues(req.statements)
 	if err != nil {
 		return &Iter{err: err}
 	}
