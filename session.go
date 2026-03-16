@@ -554,6 +554,7 @@ func (s *Session) Query(stmt string, values ...interface{}) *Query {
 	qry.stmt = stmt
 	qry.values = values
 	qry.hostID = ""
+	qry.pinPagesToHost = false
 	qry.defaultsFromSession()
 	qry.routingInfo.lwt = false
 	qry.SetRequestTimeout(s.cfg.Timeout)
@@ -1175,6 +1176,7 @@ type Query struct {
 	skipPrepare           bool
 	disableSkipMetadata   bool
 	defaultTimestamp      bool
+	pinPagesToHost        bool
 }
 
 type queryRoutingInfo struct {
@@ -1561,6 +1563,20 @@ func (q *Query) PageState(state []byte) *Query {
 // https://github.com/apache/cassandra-gocql-driver/issues/612
 func (q *Query) NoSkipMetadata() *Query {
 	q.disableSkipMetadata = true
+	return q
+}
+
+// PinPagesToHost causes subsequent pages of the query to be fetched from the
+// same host that served the first page. This can improve performance for paged
+// queries by leveraging hot caches on the node. If the pinned host becomes
+// unavailable between pages, the driver automatically falls back to normal host
+// selection using the configured HostSelectionPolicy.
+//
+// Note: this differs from SetHostID in that PinPagesToHost is dynamic — the
+// host is determined by whichever node serves the first page, and fallback is
+// automatic. SetHostID is a hard pin that returns an error if the host is down.
+func (q *Query) PinPagesToHost() *Query {
+	q.pinPagesToHost = true
 	return q
 }
 
@@ -2051,8 +2067,34 @@ func (n *nextIter) fetch() *Iter {
 		} else {
 			n.next = n.qry.session.executeQuery(n.qry)
 		}
+
+		// If PinPagesToHost was used and the pinned host failed with a
+		// host-connectivity error, fall back to normal host selection and
+		// retry. This handles the case where a node goes down between
+		// pages — the paging state is portable across nodes.
+		// Only retry on host-related errors (pool missing, no connections,
+		// host down) to avoid wasting a retry on query-level errors like
+		// syntax errors or permission failures.
+		if n.next != nil && n.next.err != nil && n.qry.pinPagesToHost && n.qry.hostID != "" && n.qry.conn == nil && isHostConnError(n.next.err) {
+			n.qry.hostID = ""
+			n.next = n.qry.session.executeQuery(n.qry)
+		}
 	})
 	return n.next
+}
+
+// isHostConnError returns true if the error indicates a host-level connectivity
+// problem (host down, pool missing, no connections). These are safe to retry on
+// a different host. Query-level errors (syntax, permissions, etc.) should not
+// trigger a fallback retry.
+func isHostConnError(err error) bool {
+	return errors.Is(err, ErrNoPool) ||
+		errors.Is(err, ErrNoConnectionsInPool) ||
+		errors.Is(err, ErrHostDown) ||
+		errors.Is(err, ErrConnectionClosed) ||
+		errors.Is(err, ErrTimeoutNoResponse) ||
+		errors.Is(err, ErrTooManyTimeouts) ||
+		errors.Is(err, ErrNoStreams)
 }
 
 type Batch struct {
