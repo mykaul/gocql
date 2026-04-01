@@ -359,9 +359,22 @@ func TestTestTableNameTruncation(t *testing.T) {
 		if len(got) > maxCQLIdentifierLen {
 			t.Errorf("len = %d, want <= %d; value = %q", len(got), maxCQLIdentifierLen, got)
 		}
-		// Should contain chars from both the start and end.
-		if got[:5] != "testt" {
-			t.Errorf("expected prefix from test name, got %q", got)
+		// Truncated names must follow the test_<first10>_<hash>_<last10> format.
+		if !strings.HasPrefix(got, "test_") {
+			t.Errorf("expected 'test_' prefix, got %q", got)
+		}
+		parts := strings.SplitN(got, "_", 4) // "test", first10, hash, last10
+		if len(parts) != 4 {
+			t.Fatalf("expected 4 parts (test, first10, hash, last10), got %d: %q", len(parts), got)
+		}
+		if len(parts[1]) != 10 {
+			t.Errorf("expected first segment of 10 chars, got %d: %q", len(parts[1]), parts[1])
+		}
+		if len(parts[2]) != 8 {
+			t.Errorf("expected hash segment of 8 chars, got %d: %q", len(parts[2]), parts[2])
+		}
+		if len(parts[3]) != 10 {
+			t.Errorf("expected last segment of 10 chars, got %d: %q", len(parts[3]), parts[3])
 		}
 	})
 }
