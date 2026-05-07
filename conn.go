@@ -1767,23 +1767,23 @@ func (c *Conn) executeQuery(ctx context.Context, qry *Query) (iter *Iter) {
 				// during frame parsing, no additional copy needed.
 				iter.meta.pagingState = x.meta.pagingState
 			} else {
+				x.release()
 				return newErrorIterWithReleasedFramer(errors.New("gocql: did not receive metadata but prepared info is nil"), framer).bindWarningHandler(qry, warningHandler)
 			}
 		}
 
 		if x.meta.morePages() && !qry.disableAutoPage {
-			newQry := new(Query)
-			*newQry = *qry
-			newQry.pageState = x.meta.pagingState
-			newQry.metrics = &queryMetrics{m: make(map[UUID]*hostMetrics)}
-
-			iter.next = newNextIter(newQry, int((1-qry.prefetch)*float64(x.numRows)))
+			// Note: x.meta.pagingState is a slice allocated by readBytesCopy()
+			// and is safe to reference after x.release() — release zeros the
+			// slice header in x.meta but the backing array remains valid.
+			iter.next = newNextIterWithPageState(qry, x.meta.pagingState, int((1-qry.prefetch)*float64(x.numRows)))
 
 			if iter.next.pos < 1 {
 				iter.next.pos = 1
 			}
 		}
 
+		x.release()
 		return iter
 	case *resultKeyspaceFrame:
 		return (&Iter{framer: framer}).bindWarningHandler(qry, warningHandler)
@@ -2052,6 +2052,7 @@ func (c *Conn) executeBatchOnce(ctx context.Context, batch *Batch) *Iter {
 			framer:  framer,
 			numRows: x.numRows,
 		}).bindWarningHandler(batch, warningHandler)
+		x.release()
 
 		return iter
 	case error:
