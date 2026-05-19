@@ -540,25 +540,25 @@ func TestHandleSchemaEvent(t *testing.T) {
 				wantTablets: 2,
 			},
 			{
-				name:        "type/CREATED clears entire keyspace",
-				keyspaces:   map[string][]string{"test_ks": {"tbl_a", "tbl_b"}},
-				event:       &frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"},
-				wantKsGone:  []string{"test_ks"},
-				wantTablets: -1,
+				name:          "type/CREATED marks types dirty but keeps keyspace",
+				keyspaces:     map[string][]string{"test_ks": {"tbl_a", "tbl_b"}},
+				event:         &frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"},
+				wantKsPresent: []string{"test_ks"},
+				wantTablets:   -1,
 			},
 			{
-				name:        "function/CREATED clears entire keyspace",
-				keyspaces:   map[string][]string{"test_ks": {"tbl_a"}},
-				event:       &frm.SchemaChangeFunction{Change: "CREATED", Keyspace: "test_ks", Name: "fn", Args: []string{"int"}},
-				wantKsGone:  []string{"test_ks"},
-				wantTablets: -1,
+				name:          "function/CREATED marks functions dirty but keeps keyspace",
+				keyspaces:     map[string][]string{"test_ks": {"tbl_a"}},
+				event:         &frm.SchemaChangeFunction{Change: "CREATED", Keyspace: "test_ks", Name: "fn", Args: []string{"int"}},
+				wantKsPresent: []string{"test_ks"},
+				wantTablets:   -1,
 			},
 			{
-				name:        "aggregate/CREATED clears entire keyspace",
-				keyspaces:   map[string][]string{"test_ks": {"tbl_a"}},
-				event:       &frm.SchemaChangeAggregate{Change: "CREATED", Keyspace: "test_ks", Name: "agg", Args: []string{"int"}},
-				wantKsGone:  []string{"test_ks"},
-				wantTablets: -1,
+				name:          "aggregate/CREATED marks aggregates dirty but keeps keyspace",
+				keyspaces:     map[string][]string{"test_ks": {"tbl_a"}},
+				event:         &frm.SchemaChangeAggregate{Change: "CREATED", Keyspace: "test_ks", Name: "agg", Args: []string{"int"}},
+				wantKsPresent: []string{"test_ks"},
+				wantTablets:   -1,
 			},
 			// Cross-isolation
 			{
@@ -767,15 +767,16 @@ func TestHandleSchemaEvent(t *testing.T) {
 	t.Run("GetKeyspace", func(t *testing.T) {
 		t.Parallel()
 		tests := []struct {
-			name                string
-			knownKeyspaces      map[string][]tableInfo
-			populateKs          map[string][]string
-			disableSystemSchema bool
-			event               frame // nil = no event
-			getKeyspace         string
-			wantError           bool
-			expectedQueries     map[string]int // nil = skip check; empty = expect 0 queries
-			wantNoRequery       bool           // second identical call fires 0 queries
+			name                         string
+			knownKeyspaces               map[string][]tableInfo
+			populateKs                   map[string][]string
+			disableSystemSchema          bool
+			enableFunctionsAndAggregates bool
+			event                        frame // nil = no event
+			getKeyspace                  string
+			wantError                    bool
+			expectedQueries              map[string]int // nil = skip check; empty = expect 0 queries
+			wantNoRequery                bool           // second identical call fires 0 queries
 		}{
 			{
 				name: "after keyspace event: refreshes and caches",
@@ -796,15 +797,47 @@ func TestHandleSchemaEvent(t *testing.T) {
 				expectedQueries: noQueries,
 			},
 			{
-				name: "after type event: refreshes and caches",
+				name: "after type event: refreshes only types and caches",
 				knownKeyspaces: map[string][]tableInfo{
 					"test_ks": {{name: "tbl_a", columns: []columnInfo{{name: "id", kind: "partition_key", position: 0}}}},
 				},
-				populateKs:      map[string][]string{"test_ks": {"tbl_a"}},
-				event:           &frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"},
-				getKeyspace:     "test_ks",
-				expectedQueries: fullRefresh("test_ks"),
-				wantNoRequery:   true,
+				populateKs:  map[string][]string{"test_ks": {"tbl_a"}},
+				event:       &frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"},
+				getKeyspace: "test_ks",
+				expectedQueries: map[string]int{
+					"SELECT * FROM system_schema.types WHERE keyspace_name = ?": 1,
+				},
+				wantNoRequery: true,
+			},
+			{
+				name: "after function event: refreshes functions+aggregates (aggregates depend on functions) and caches",
+				knownKeyspaces: map[string][]tableInfo{
+					"test_ks": {{name: "tbl_a", columns: []columnInfo{{name: "id", kind: "partition_key", position: 0}}}},
+				},
+				populateKs:                   map[string][]string{"test_ks": {"tbl_a"}},
+				enableFunctionsAndAggregates: true,
+				event:                        &frm.SchemaChangeFunction{Change: "CREATED", Keyspace: "test_ks", Name: "my_fn", Args: []string{"int"}},
+				getKeyspace:                  "test_ks",
+				expectedQueries: map[string]int{
+					"SELECT * FROM system_schema.functions WHERE keyspace_name = ?":  1,
+					"SELECT * FROM system_schema.aggregates WHERE keyspace_name = ?": 1,
+				},
+				wantNoRequery: true,
+			},
+			{
+				name: "after aggregate event: refreshes functions and aggregates and caches",
+				knownKeyspaces: map[string][]tableInfo{
+					"test_ks": {{name: "tbl_a", columns: []columnInfo{{name: "id", kind: "partition_key", position: 0}}}},
+				},
+				populateKs:                   map[string][]string{"test_ks": {"tbl_a"}},
+				enableFunctionsAndAggregates: true,
+				event:                        &frm.SchemaChangeAggregate{Change: "CREATED", Keyspace: "test_ks", Name: "my_agg", Args: []string{"int"}},
+				getKeyspace:                  "test_ks",
+				expectedQueries: map[string]int{
+					"SELECT * FROM system_schema.functions WHERE keyspace_name = ?":  1,
+					"SELECT * FROM system_schema.aggregates WHERE keyspace_name = ?": 1,
+				},
+				wantNoRequery: true,
 			},
 			{
 				name:            "uncached keyspace: refreshes and caches",
@@ -838,6 +871,9 @@ func TestHandleSchemaEvent(t *testing.T) {
 				defer s.Close()
 				if tt.disableSystemSchema {
 					s.useSystemSchema = false
+				}
+				if tt.enableFunctionsAndAggregates {
+					s.hasAggregatesAndFunctions = true
 				}
 				for ks, tables := range tt.populateKs {
 					populateKeyspace(s, ks, tables...)
@@ -921,14 +957,16 @@ func TestHandleSchemaEvent(t *testing.T) {
 				expectNoRequery: true,
 			},
 			{
-				name: "after type event: refreshes full keyspace",
+				name: "after type event: refreshes only types",
 				knownKeyspaces: map[string][]tableInfo{
 					"test_ks": {{name: "tbl_a", columns: []columnInfo{{name: "id", kind: "partition_key", position: 0}}}},
 				},
-				populateKs:      map[string][]string{"test_ks": {"tbl_a"}},
-				event:           &frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"},
-				getTable:        [2]string{"test_ks", "tbl_a"},
-				expectedQueries: fullRefresh("test_ks"),
+				populateKs: map[string][]string{"test_ks": {"tbl_a"}},
+				event:      &frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"},
+				getTable:   [2]string{"test_ks", "tbl_a"},
+				expectedQueries: map[string]int{
+					"SELECT * FROM system_schema.types WHERE keyspace_name = ?": 1,
+				},
 			},
 			{
 				name: "unknown table: returns error",
