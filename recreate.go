@@ -66,8 +66,7 @@ func (ks *KeyspaceMetadata) ToCQL() (string, error) {
 		}
 	}
 
-	ks.CreateStmts = sb.String()
-	return ks.CreateStmts, nil
+	return sb.String(), nil
 }
 
 func (ks *KeyspaceMetadata) typesSortedTopologically() []*TypeMetadata {

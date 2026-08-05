@@ -22,11 +22,13 @@
 package gocql
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,6 +66,17 @@ var keyspaceMeta = resultMetadata{
 	},
 	actualColCount: 2,
 	colCount:       2,
+}
+
+var describeMeta = resultMetadata{
+	columns: []ColumnInfo{
+		{Name: "keyspace_name", TypeInfo: typeVarchar},
+		{Name: "type", TypeInfo: typeVarchar},
+		{Name: "name", TypeInfo: typeVarchar},
+		{Name: "create_statement", TypeInfo: typeVarchar},
+	},
+	actualColCount: 4,
+	colCount:       4,
 }
 
 var tableMeta = resultMetadata{
@@ -195,6 +208,9 @@ type schemaDataMock struct {
 	knownKeyspaces map[string][]tableInfo
 	queryDelay     time.Duration
 	queryError     error // if set, querySystem returns an Iter with this error
+	describeText   string
+	describeErr    error                  // if set, DESCRIBE KEYSPACE fails with this error
+	onQuerySystem  func(statement string) // optional hook, runs before each querySystem
 }
 
 func (m *schemaDataMock) awaitSchemaAgreement() error {
@@ -208,10 +224,20 @@ func (m *schemaDataMock) query(statement string, values ...any) *Iter {
 	m.mu.Lock()
 	m.queries = append(m.queries, queryRecord{method: "query", stmt: statement})
 	delay := m.queryDelay
+	describeText, describeErr := m.describeText, m.describeErr
 	m.mu.Unlock()
 
 	if delay > 0 {
 		time.Sleep(delay)
+	}
+
+	if strings.HasPrefix(statement, "DESCRIBE KEYSPACE") {
+		if describeErr != nil {
+			return &Iter{err: describeErr}
+		}
+		if describeText != "" {
+			return makeIter(describeMeta, marshalRow(describeMeta, []any{"ks", "keyspace", "ks", describeText}))
+		}
 	}
 
 	return &Iter{}
@@ -222,8 +248,12 @@ func (m *schemaDataMock) querySystem(statement string, values ...any) *Iter {
 	m.queries = append(m.queries, queryRecord{method: "querySystem", stmt: statement})
 	delay := m.queryDelay
 	queryErr := m.queryError
+	hook := m.onQuerySystem
 	m.mu.Unlock()
 
+	if hook != nil {
+		hook(statement)
+	}
 	if delay > 0 {
 		time.Sleep(delay)
 	}
@@ -540,25 +570,25 @@ func TestHandleSchemaEvent(t *testing.T) {
 				wantTablets: 2,
 			},
 			{
-				name:        "type/CREATED clears entire keyspace",
-				keyspaces:   map[string][]string{"test_ks": {"tbl_a", "tbl_b"}},
-				event:       &frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"},
-				wantKsGone:  []string{"test_ks"},
-				wantTablets: -1,
+				name:          "type/CREATED marks types dirty but keeps keyspace",
+				keyspaces:     map[string][]string{"test_ks": {"tbl_a", "tbl_b"}},
+				event:         &frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"},
+				wantKsPresent: []string{"test_ks"},
+				wantTablets:   -1,
 			},
 			{
-				name:        "function/CREATED clears entire keyspace",
-				keyspaces:   map[string][]string{"test_ks": {"tbl_a"}},
-				event:       &frm.SchemaChangeFunction{Change: "CREATED", Keyspace: "test_ks", Name: "fn", Args: []string{"int"}},
-				wantKsGone:  []string{"test_ks"},
-				wantTablets: -1,
+				name:          "function/CREATED marks functions dirty but keeps keyspace",
+				keyspaces:     map[string][]string{"test_ks": {"tbl_a"}},
+				event:         &frm.SchemaChangeFunction{Change: "CREATED", Keyspace: "test_ks", Name: "fn", Args: []string{"int"}},
+				wantKsPresent: []string{"test_ks"},
+				wantTablets:   -1,
 			},
 			{
-				name:        "aggregate/CREATED clears entire keyspace",
-				keyspaces:   map[string][]string{"test_ks": {"tbl_a"}},
-				event:       &frm.SchemaChangeAggregate{Change: "CREATED", Keyspace: "test_ks", Name: "agg", Args: []string{"int"}},
-				wantKsGone:  []string{"test_ks"},
-				wantTablets: -1,
+				name:          "aggregate/CREATED marks aggregates dirty but keeps keyspace",
+				keyspaces:     map[string][]string{"test_ks": {"tbl_a"}},
+				event:         &frm.SchemaChangeAggregate{Change: "CREATED", Keyspace: "test_ks", Name: "agg", Args: []string{"int"}},
+				wantKsPresent: []string{"test_ks"},
+				wantTablets:   -1,
 			},
 			// Cross-isolation
 			{
@@ -771,6 +801,7 @@ func TestHandleSchemaEvent(t *testing.T) {
 			knownKeyspaces      map[string][]tableInfo
 			populateKs          map[string][]string
 			disableSystemSchema bool
+			enableFunctions     bool  // session.hasAggregatesAndFunctions
 			event               frame // nil = no event
 			getKeyspace         string
 			wantError           bool
@@ -796,15 +827,50 @@ func TestHandleSchemaEvent(t *testing.T) {
 				expectedQueries: noQueries,
 			},
 			{
-				name: "after type event: refreshes and caches",
+				name: "after type event: refreshes only types and caches",
+				knownKeyspaces: map[string][]tableInfo{
+					"test_ks": {{name: "tbl_a", columns: []columnInfo{{name: "id", kind: "partition_key", position: 0}}}},
+				},
+				populateKs:  map[string][]string{"test_ks": {"tbl_a"}},
+				event:       &frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"},
+				getKeyspace: "test_ks",
+				expectedQueries: map[string]int{
+					"SELECT * FROM system_schema.types WHERE keyspace_name = ?": 1,
+					"DESCRIBE KEYSPACE test_ks WITH INTERNALS":                  1,
+				},
+				wantNoRequery: true,
+			},
+			{
+				name: "after function event: refreshes functions and aggregates and caches",
 				knownKeyspaces: map[string][]tableInfo{
 					"test_ks": {{name: "tbl_a", columns: []columnInfo{{name: "id", kind: "partition_key", position: 0}}}},
 				},
 				populateKs:      map[string][]string{"test_ks": {"tbl_a"}},
-				event:           &frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"},
+				enableFunctions: true,
+				event:           &frm.SchemaChangeFunction{Change: "CREATED", Keyspace: "test_ks", Name: "fn", Args: []string{"int"}},
 				getKeyspace:     "test_ks",
-				expectedQueries: fullRefresh("test_ks"),
-				wantNoRequery:   true,
+				expectedQueries: map[string]int{
+					"SELECT * FROM system_schema.functions WHERE keyspace_name = ?":  1,
+					"SELECT * FROM system_schema.aggregates WHERE keyspace_name = ?": 1,
+					"DESCRIBE KEYSPACE test_ks WITH INTERNALS":                       1,
+				},
+				wantNoRequery: true,
+			},
+			{
+				name: "after aggregate event: refreshes functions and aggregates and caches",
+				knownKeyspaces: map[string][]tableInfo{
+					"test_ks": {{name: "tbl_a", columns: []columnInfo{{name: "id", kind: "partition_key", position: 0}}}},
+				},
+				populateKs:      map[string][]string{"test_ks": {"tbl_a"}},
+				enableFunctions: true,
+				event:           &frm.SchemaChangeAggregate{Change: "CREATED", Keyspace: "test_ks", Name: "agg", Args: []string{"int"}},
+				getKeyspace:     "test_ks",
+				expectedQueries: map[string]int{
+					"SELECT * FROM system_schema.functions WHERE keyspace_name = ?":  1,
+					"SELECT * FROM system_schema.aggregates WHERE keyspace_name = ?": 1,
+					"DESCRIBE KEYSPACE test_ks WITH INTERNALS":                       1,
+				},
+				wantNoRequery: true,
 			},
 			{
 				name:            "uncached keyspace: refreshes and caches",
@@ -838,6 +904,9 @@ func TestHandleSchemaEvent(t *testing.T) {
 				defer s.Close()
 				if tt.disableSystemSchema {
 					s.useSystemSchema = false
+				}
+				if tt.enableFunctions {
+					s.hasAggregatesAndFunctions = true
 				}
 				for ks, tables := range tt.populateKs {
 					populateKeyspace(s, ks, tables...)
@@ -882,6 +951,7 @@ func TestHandleSchemaEvent(t *testing.T) {
 			name            string
 			knownKeyspaces  map[string][]tableInfo
 			populateKs      map[string][]string
+			enableFunctions bool // session.hasAggregatesAndFunctions
 			event           frame
 			getTable        [2]string // [ks, table]
 			wantError       bool
@@ -921,14 +991,50 @@ func TestHandleSchemaEvent(t *testing.T) {
 				expectNoRequery: true,
 			},
 			{
-				name: "after type event: refreshes full keyspace",
+				name: "after type event: refreshes only types",
+				knownKeyspaces: map[string][]tableInfo{
+					"test_ks": {{name: "tbl_a", columns: []columnInfo{{name: "id", kind: "partition_key", position: 0}}}},
+				},
+				populateKs: map[string][]string{"test_ks": {"tbl_a"}},
+				event:      &frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"},
+				getTable:   [2]string{"test_ks", "tbl_a"},
+				expectedQueries: map[string]int{
+					"SELECT * FROM system_schema.types WHERE keyspace_name = ?": 1,
+					"DESCRIBE KEYSPACE test_ks WITH INTERNALS":                  1,
+				},
+				expectNoRequery: true,
+			},
+			{
+				name: "after function event: refreshes functions and aggregates",
 				knownKeyspaces: map[string][]tableInfo{
 					"test_ks": {{name: "tbl_a", columns: []columnInfo{{name: "id", kind: "partition_key", position: 0}}}},
 				},
 				populateKs:      map[string][]string{"test_ks": {"tbl_a"}},
-				event:           &frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"},
+				enableFunctions: true,
+				event:           &frm.SchemaChangeFunction{Change: "CREATED", Keyspace: "test_ks", Name: "fn", Args: []string{"int"}},
 				getTable:        [2]string{"test_ks", "tbl_a"},
-				expectedQueries: fullRefresh("test_ks"),
+				expectedQueries: map[string]int{
+					"SELECT * FROM system_schema.functions WHERE keyspace_name = ?":  1,
+					"SELECT * FROM system_schema.aggregates WHERE keyspace_name = ?": 1,
+					"DESCRIBE KEYSPACE test_ks WITH INTERNALS":                       1,
+				},
+				expectNoRequery: true,
+			},
+			{
+				name: "after aggregate event: refreshes functions and aggregates",
+				knownKeyspaces: map[string][]tableInfo{
+					"test_ks": {{name: "tbl_a", columns: []columnInfo{{name: "id", kind: "partition_key", position: 0}}}},
+				},
+				populateKs:      map[string][]string{"test_ks": {"tbl_a"}},
+				enableFunctions: true,
+				event:           &frm.SchemaChangeAggregate{Change: "CREATED", Keyspace: "test_ks", Name: "agg", Args: []string{"int"}},
+				getTable:        [2]string{"test_ks", "tbl_a"},
+				expectedQueries: map[string]int{
+					"SELECT * FROM system_schema.functions WHERE keyspace_name = ?":  1,
+					"SELECT * FROM system_schema.aggregates WHERE keyspace_name = ?": 1,
+					"DESCRIBE KEYSPACE test_ks WITH INTERNALS":                       1,
+				},
+				expectNoRequery: true,
 			},
 			{
 				name: "unknown table: returns error",
@@ -956,6 +1062,9 @@ func TestHandleSchemaEvent(t *testing.T) {
 				ctrl := &schemaDataMock{knownKeyspaces: knownKs}
 				s := newSchemaEventTestSessionWithMock(ctrl)
 				defer s.Close()
+				if tt.enableFunctions {
+					s.hasAggregatesAndFunctions = true
+				}
 				for ks, tables := range tt.populateKs {
 					populateKeyspace(s, ks, tables...)
 				}
@@ -1052,6 +1161,55 @@ func TestHandleSchemaEvent(t *testing.T) {
 		}
 		if got := ctrl.getQueryCount(); got != 0 {
 			t.Fatalf("tbl_c not invalidated, expected 0 queries, got %d", got)
+		}
+	})
+
+	t.Run("function event without UDF/UDA support: clears flag without wiping data", func(t *testing.T) {
+		t.Parallel()
+		ctrl := &schemaDataMock{
+			knownKeyspaces: map[string][]tableInfo{
+				"test_ks": {{name: "tbl_a", columns: []columnInfo{{name: "id", kind: "partition_key", position: 0}}}},
+			},
+		}
+		s := newSchemaEventTestSessionWithMock(ctrl) // hasAggregatesAndFunctions = false
+		defer s.Close()
+		populateKeyspace(s, "test_ks", "tbl_a")
+
+		// Pre-seed functions/aggregates: a spurious invalidation on a
+		// pre-2.2 server must not wipe them.
+		ks, ok := s.metadataDescriber.metadata.keyspaceMetadata.getKeyspace("test_ks")
+		if !ok {
+			t.Fatal("test_ks should be cached")
+		}
+		ks = ks.Clone()
+		ks.Functions = map[string]*FunctionMetadata{"fn": {Name: "fn"}}
+		ks.Aggregates = map[string]*AggregateMetadata{"agg": {Name: "agg"}}
+		s.metadataDescriber.metadata.keyspaceMetadata.set("test_ks", ks)
+
+		s.handleSchemaEvent([]frame{
+			&frm.SchemaChangeFunction{Change: "CREATED", Keyspace: "test_ks", Name: "fn2", Args: []string{"int"}},
+		})
+
+		ctrl.resetQueries()
+
+		ksAfter, err := s.metadataDescriber.GetKeyspace("test_ks")
+		if err != nil {
+			t.Fatalf("GetKeyspace failed: %v", err)
+		}
+		if n := ctrl.getQueryCount(); n != 0 {
+			t.Fatalf("expected no functions/aggregates queries on a server without UDF/UDA support, got %d", n)
+		}
+		if _, ok := ksAfter.Functions["fn"]; !ok {
+			t.Fatal("pre-existing Functions data was wiped despite hasAggregatesAndFunctions=false")
+		}
+		if _, ok := ksAfter.Aggregates["agg"]; !ok {
+			t.Fatal("pre-existing Aggregates data was wiped despite hasAggregatesAndFunctions=false")
+		}
+
+		// The dirty flags must still be cleared, otherwise GetKeyspace would
+		// keep retrying a refresh that can never succeed on this server.
+		if ksAfter.needsPartialRefresh() {
+			t.Fatal("expected needsPartialRefresh to be false after handling the event")
 		}
 	})
 
@@ -1645,4 +1803,123 @@ func TestConcurrentSchemaRefreshErrorHandling(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestPartialRefreshCreateStmts(t *testing.T) {
+	t.Parallel()
+
+	const fresh = "CREATE KEYSPACE test_ks WITH tablets = {'enabled': false};"
+	tests := []struct {
+		name         string
+		describeText string
+		describeErr  error
+		wantErr      bool
+		want         string
+	}{
+		{name: "publishes refetched DESCRIBE", describeText: fresh, want: fresh},
+		{name: "unsupported DESCRIBE clears CreateStmts", want: ""},
+		{name: "DESCRIBE failure keeps cache dirty and unchanged", describeText: fresh, describeErr: errors.New("boom"), wantErr: true, want: "old describe"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := &schemaDataMock{
+				knownKeyspaces: map[string][]tableInfo{"test_ks": {}},
+				describeText:   tt.describeText,
+				describeErr:    tt.describeErr,
+			}
+			s := newSchemaEventTestSessionWithMock(ctrl)
+			defer s.Close()
+			populateKeyspace(s, "test_ks", "tbl_a")
+			s.metadataDescriber.metadata.keyspaceMetadata.updateKeyspace("test_ks", func(ks *KeyspaceMetadata) {
+				ks.CreateStmts = "old describe"
+			})
+			s.handleSchemaEvent([]frame{&frm.SchemaChangeType{Change: "CREATED", Keyspace: "test_ks", Object: "my_type"}})
+
+			_, err := s.metadataDescriber.GetKeyspace("test_ks")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("GetKeyspace err = %v, wantErr %v", err, tt.wantErr)
+			}
+			ks, _ := s.metadataDescriber.metadata.keyspaceMetadata.getKeyspace("test_ks")
+			if ks.CreateStmts != tt.want {
+				t.Fatalf("CreateStmts = %q, want %q", ks.CreateStmts, tt.want)
+			}
+			if tt.wantErr && !ks.typesInvalidated {
+				t.Fatal("cache should stay dirty after a failed partial refresh")
+			}
+		})
+	}
+}
+
+// A category invalidated mid-fetch stays dirty, so the fetched DESCRIBE
+// text must not be published.
+func TestPartialRefreshCreateStmtsDirtyCategory(t *testing.T) {
+	t.Parallel()
+	ctrl := &schemaDataMock{
+		knownKeyspaces: map[string][]tableInfo{"test_ks": {}},
+		describeText:   "CREATE KEYSPACE test_ks;",
+	}
+	s := newSchemaEventTestSessionWithMock(ctrl)
+	defer s.Close()
+	s.hasAggregatesAndFunctions = true
+	populateKeyspace(s, "test_ks", "tbl_a")
+	s.metadataDescriber.metadata.keyspaceMetadata.updateKeyspace("test_ks", func(ks *KeyspaceMetadata) {
+		ks.CreateStmts = "old describe"
+	})
+	var once sync.Once
+	ctrl.onQuerySystem = func(stmt string) {
+		if strings.Contains(stmt, "system_schema.functions") {
+			once.Do(func() { s.metadataDescriber.invalidateTypesSchema("test_ks") })
+		}
+	}
+	s.metadataDescriber.invalidateTypesSchema("test_ks")
+	s.metadataDescriber.invalidateFunctionsSchema("test_ks")
+
+	ks, _ := s.metadataDescriber.metadata.keyspaceMetadata.getKeyspace("test_ks")
+	if err := s.metadataDescriber.refreshPartialKeyspaceSchema("test_ks", ks); err != nil {
+		t.Fatal(err)
+	}
+	ks, _ = s.metadataDescriber.metadata.keyspaceMetadata.getKeyspace("test_ks")
+	if !ks.typesInvalidated || ks.functionsInvalidated {
+		t.Fatalf("want types dirty and functions clean, got types=%v functions=%v", ks.typesInvalidated, ks.functionsInvalidated)
+	}
+	if ks.CreateStmts != "" {
+		t.Fatalf("CreateStmts = %q, want empty while a category is dirty", ks.CreateStmts)
+	}
+}
+
+// Invalidations landing during every partial attempt and the fallback full
+// refresh must not leave GetKeyspace returning a dirty entry.
+func TestGetKeyspaceDirtyAfterFallback(t *testing.T) {
+	t.Parallel()
+	ctrl := &schemaDataMock{knownKeyspaces: map[string][]tableInfo{"test_ks": {}}}
+	s := newSchemaEventTestSessionWithMock(ctrl)
+	defer s.Close()
+	populateKeyspace(s, "test_ks", "tbl_a")
+	var n atomic.Int32
+	ctrl.onQuerySystem = func(stmt string) {
+		// Calls 1-3: partial attempts; 4: the fallback full refresh.
+		if strings.Contains(stmt, "system_schema.types") && n.Add(1) <= 4 {
+			s.metadataDescriber.invalidateTypesSchema("test_ks")
+		}
+	}
+	s.metadataDescriber.invalidateTypesSchema("test_ks")
+
+	ks, err := s.metadataDescriber.GetKeyspace("test_ks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ks.needsPartialRefresh() {
+		t.Fatal("GetKeyspace returned an entry that still needs a partial refresh")
+	}
+}
+
+func TestCompileMetadataAggregateWithoutFinalFunc(t *testing.T) {
+	t.Parallel()
+	ks := &KeyspaceMetadata{Name: "ks"}
+	aggs := []AggregateMetadata{{Name: "agg", stateFunc: "missing"}}
+	compileMetadata(ks, nil, nil, nil, aggs, nil, nil, nil, nil)
+	if _, ok := ks.Aggregates["agg"]; !ok {
+		t.Fatal("aggregate not compiled")
+	}
 }
