@@ -10,12 +10,42 @@ CASSANDRA_VERSION ?= LATEST
 SCYLLA_VERSION ?= LATEST
 
 GOLANGCI_VERSION = 2.5.0
+GET_VERSION_VERSION = 0.4.5
+GET_VERSION_BIN = $(MAKEFILE_PATH)/bin/get-version
 
 TEST_CQL_PROTOCOL ?= 4
 TEST_COMPRESSOR ?= snappy
 TEST_OPTS ?=
 TEST_INTEGRATION_TAGS ?= integration gocql_debug
 JVM_EXTRA_OPTS ?= -Dcassandra.test.fail_writes_ks=test -Dcassandra.custom_query_handler_class=org.apache.cassandra.cql3.CustomPayloadMirroringQueryHandler
+
+# COVER_ARGS is appended to every `go test ... ./...` invocation below. It is
+# empty by default, so plain `make test-unit` behaves exactly as before; the
+# *-coverage targets further down set it via a recursive `make` call to
+# instrument the same test run instead of duplicating its recipe.
+COVER_ARGS ?=
+
+# test-integration-scylla/cassandra can't use the same COVER_ARGS trick: they
+# already pass custom, test-binary-defined flags (-distribution, -cluster,
+# ...) that `go test` itself doesn't recognize. Once `go test` hits the first
+# such flag, it stops parsing its own flags -- including the package pattern
+# (./...), which then silently defaults to "." instead of erroring -- so
+# anything placed after it (like COVER_ARGS previously was) is unreliable.
+# COVER_BUILD_ARGS (flags `go test` itself must recognize, e.g. -cover)
+# goes before the package pattern; COVER_RUNTIME_ARGS (everything meant for
+# the test binary, after -args) goes after it, alongside the custom flags.
+COVER_BUILD_ARGS ?=
+COVER_RUNTIME_ARGS ?=
+COVERAGE_DIR ?= $(MAKEFILE_PATH)/.coverage/data
+# Normalize to an absolute path even when overridden on the command line
+# (e.g. COVERAGE_DIR=.cov): go test's subpackages (and lz4, run via -C) each
+# execute with their own directory as the working directory, so a relative
+# -test.gocoverdir resolves differently -- and usually inaccessibly -- per
+# package instead of to one shared directory at the repo root. `override` is
+# required here: a variable set on the `make` command line takes precedence
+# over a plain assignment in the Makefile, so without it this would silently
+# do nothing whenever someone actually overrides COVERAGE_DIR.
+override COVERAGE_DIR := $(abspath $(COVERAGE_DIR))
 
 CCM_CASSANDRA_CLUSTER_NAME = gocql_cassandra_integration_test
 CCM_CASSANDRA_IP_PREFIX = 127.0.1.
@@ -85,10 +115,10 @@ print-config:
 	@[[ -d "$(MAKEFILE_PATH)/bin" ]] || mkdir "$(MAKEFILE_PATH)/bin"
 
 .prepare-get-version: .prepare-bin
-	@if [[ ! -f "$(MAKEFILE_PATH)/bin/get-version" ]]; then
-		echo "bin/get-version is not found, installing it"
-		curl -sSLo /tmp/get-version.zip https://github.com/scylladb-actions/get-version/releases/download/v0.4.3/get-version_0.4.3_linux_amd64v3.zip
-		unzip /tmp/get-version.zip get-version -d "$(MAKEFILE_PATH)/bin" >/dev/null
+	@if [[ ! -x "${GET_VERSION_BIN}" ]] || [[ "$$("${GET_VERSION_BIN}" -version 2>/dev/null)" != "${GET_VERSION_VERSION}" ]]; then
+		echo "Installing get-version ${GET_VERSION_VERSION}"
+		curl -sSLo /tmp/get-version.zip https://github.com/scylladb-actions/get-version/releases/download/v${GET_VERSION_VERSION}/get-version_${GET_VERSION_VERSION}_linux_amd64v3.zip
+		unzip -o /tmp/get-version.zip get-version -d "$(MAKEFILE_PATH)/bin" >/dev/null
 	fi
 
 .prepare-environment-update-aio-max-nr:
@@ -276,6 +306,16 @@ scylla-stop: .prepare-scylla-ccm
 	@ccm stop --not-gently ${CCM_SCYLLA_CLUSTER_NAME} 2>/dev/null 1>&2 || true
 	@ccm remove ${CCM_SCYLLA_CLUSTER_NAME} 2>/dev/null 1>&2 || true
 
+# The package pattern below is "." (this package only), not "./...". All
+# integration-tagged test files live in this package; the handful of
+# unconditional (untagged) test files in other packages -- dialer,
+# hostpolicy, several serialization/* packages, etc. -- would also get
+# built and would fail to parse -distribution/-cluster/etc, which only this
+# package's test files register. Cross-package coverage attribution still
+# works without testing those packages directly: -coverpkg=./... controls
+# what gets *instrumented*, separately from what gets *run*, so code in
+# other packages exercised transitively through this package's tests is
+# still measured under test-integration-*-coverage.
 test-integration-cassandra: cassandra-start
 	@echo "Run integration tests for proto ${TEST_CQL_PROTOCOL} on cassandra ${CASSANDRA_VERSION}"
 	if [[ -z "$${CASSANDRA_VERSION_RESOLVED}" ]]; then
@@ -285,8 +325,8 @@ test-integration-cassandra: cassandra-start
 		echo "Cassandra version ${CASSANDRA_VERSION} was not resolved"
 		exit 1
 	fi
-	echo "go test -v ${TEST_OPTS} -tags \"${TEST_INTEGRATION_TAGS}\" -distribution cassandra -timeout=10m -runauth -gocql.timeout=60s -runssl -proto=${TEST_CQL_PROTOCOL} -rf=3 -clusterSize=3 -autowait=2000ms -compressor=${TEST_COMPRESSOR} -gocql.cversion=$${CASSANDRA_VERSION_RESOLVED} -cluster=$$(ccm liveset) ./..."
-	go test -v ${TEST_OPTS} -tags "${TEST_INTEGRATION_TAGS}" -distribution cassandra -timeout=10m -runauth -gocql.timeout=60s -runssl -proto=${TEST_CQL_PROTOCOL} -rf=3 -clusterSize=3 -autowait=2000ms -compressor=${TEST_COMPRESSOR} -gocql.cversion=$$(ccm node1 versionfrombuild) -cluster=$$(ccm liveset) ./...
+	echo "go test -v ${TEST_OPTS} -tags \"${TEST_INTEGRATION_TAGS}\" ${COVER_BUILD_ARGS} -timeout=10m . -args -distribution cassandra -runauth -gocql.timeout=60s -runssl -proto=${TEST_CQL_PROTOCOL} -rf=3 -clusterSize=3 -autowait=2000ms -compressor=${TEST_COMPRESSOR} -gocql.cversion=$${CASSANDRA_VERSION_RESOLVED} -cluster=$$(ccm liveset) ${COVER_RUNTIME_ARGS}"
+	go test -v ${TEST_OPTS} -tags "${TEST_INTEGRATION_TAGS}" ${COVER_BUILD_ARGS} -timeout=10m . -args -distribution cassandra -runauth -gocql.timeout=60s -runssl -proto=${TEST_CQL_PROTOCOL} -rf=3 -clusterSize=3 -autowait=2000ms -compressor=${TEST_COMPRESSOR} -gocql.cversion=$$(ccm node1 versionfrombuild) -cluster=$$(ccm liveset) ${COVER_RUNTIME_ARGS}
 
 test-integration-scylla: scylla-start
 	@echo "Run integration tests for proto ${TEST_CQL_PROTOCOL} on scylla ${SCYLLA_VERSION}"
@@ -302,40 +342,146 @@ test-integration-scylla: scylla-start
 		echo "ScyllaDB version ${SCYLLA_VERSION} was not resolved"
 		exit 1
 	fi
-	echo "go test -v ${TEST_OPTS} -tags \"${TEST_INTEGRATION_TAGS}\" -distribution scylla $${CLUSTER_SOCKET} -timeout=5m -gocql.timeout=60s -proto=${TEST_CQL_PROTOCOL} -rf=3 -clusterSize=3 -autowait=2000ms -compressor=${TEST_COMPRESSOR} -gocql.cversion=$${SCYLLA_VERSION_RESOLVED} -cluster=$$(ccm liveset) ./..."
-	go test -v ${TEST_OPTS} -tags "${TEST_INTEGRATION_TAGS}" -distribution scylla $${CLUSTER_SOCKET} -timeout=5m -gocql.timeout=60s -proto=${TEST_CQL_PROTOCOL} -rf=3 -clusterSize=3 -autowait=2000ms -compressor=${TEST_COMPRESSOR} -gocql.cversion=$${SCYLLA_VERSION_RESOLVED} -cluster=$$(ccm liveset) ./...
+	echo "go test -v ${TEST_OPTS} -tags \"${TEST_INTEGRATION_TAGS}\" ${COVER_BUILD_ARGS} -timeout=5m . -args -distribution scylla $${CLUSTER_SOCKET} -gocql.timeout=60s -proto=${TEST_CQL_PROTOCOL} -rf=3 -clusterSize=3 -autowait=2000ms -compressor=${TEST_COMPRESSOR} -gocql.cversion=$${SCYLLA_VERSION_RESOLVED} -cluster=$$(ccm liveset) ${COVER_RUNTIME_ARGS}"
+	go test -v ${TEST_OPTS} -tags "${TEST_INTEGRATION_TAGS}" ${COVER_BUILD_ARGS} -timeout=5m . -args -distribution scylla $${CLUSTER_SOCKET} -gocql.timeout=60s -proto=${TEST_CQL_PROTOCOL} -rf=3 -clusterSize=3 -autowait=2000ms -compressor=${TEST_COMPRESSOR} -gocql.cversion=$${SCYLLA_VERSION_RESOLVED} -cluster=$$(ccm liveset) ${COVER_RUNTIME_ARGS}
 
+# The lz4 compressor lives in a nested module (lz4/go.mod), so the root "./..."
+# pattern does not reach it — it has to be invoked explicitly with `go test -C`,
+# the same way check-go-mod-drift lists every module. Without that, the lz4
+# tests and benchmarks are green or red independently of CI.
 test-unit: .prepare-pki
 	@echo "Run unit tests"
 	go clean -testcache
+	go clean -C lz4 -testcache
 ifeq ($(shell if [[ -n "$${GITHUB_STEP_SUMMARY}" ]]; then echo "running-in-workflow"; else echo "running-in-shell"; fi), running-in-workflow)
 	echo "### Unit Test Results" >>$${GITHUB_STEP_SUMMARY}
 	echo '```' >>$${GITHUB_STEP_SUMMARY}
-	echo go test -tags unit -timeout=5m -race ./...
-	go test -tags unit -timeout=5m -race ./... | tee -a "$${GITHUB_STEP_SUMMARY}"; TEST_STATUS=$${PIPESTATUS[0]}; echo '```' >>"$${GITHUB_STEP_SUMMARY}"; exit "$${TEST_STATUS}"
+	echo go test -tags unit -timeout=5m -race ./... ${COVER_ARGS}
+	TEST_STATUS=0
+	go test -tags unit -timeout=5m -race ./... ${COVER_ARGS} | tee -a "$${GITHUB_STEP_SUMMARY}" || TEST_STATUS=$${PIPESTATUS[0]}
+	echo go test -C lz4 -tags unit -timeout=5m -race ./... ${COVER_ARGS}
+	LZ4_TEST_STATUS=0
+	go test -C lz4 -tags unit -timeout=5m -race ./... ${COVER_ARGS} | tee -a "$${GITHUB_STEP_SUMMARY}" || LZ4_TEST_STATUS=$${PIPESTATUS[0]}
+	echo '```' >>"$${GITHUB_STEP_SUMMARY}"
+	if (( TEST_STATUS != 0 )); then exit "$${TEST_STATUS}"; fi
+	exit "$${LZ4_TEST_STATUS}"
 else
-	go test -v -tags unit -timeout=5m -race ./...
+	go test -v -tags unit -timeout=5m -race ./... ${COVER_ARGS}
+	go test -C lz4 -v -tags unit -timeout=5m -race ./... ${COVER_ARGS}
 endif
+
+.prepare-coverage-dir:
+	@mkdir -p "${COVERAGE_DIR}"
+
+# Coverage-instrumented variants of the targets above. Each recurses into the
+# original target with COVER_ARGS/COVER_BUILD_ARGS/COVER_RUNTIME_ARGS set,
+# rather than duplicating its recipe, so CCM setup, version resolution and
+# GITHUB_STEP_SUMMARY handling stay in one place. Every *-coverage target
+# writes into the same COVERAGE_DIR, so unit and integration runs (and
+# multiple integration runs against different clusters/tags) all accumulate
+# into one combined report -- see coverage-report.
+#
+# COVERAGE_DIR is quoted (with an escaped \" so the quote survives being
+# re-expanded, unquoted, inside the target recipe's own `go test` line) so a
+# path containing spaces isn't word-split by the shell into several
+# arguments.
+#
+# -covermode=atomic is explicit (rather than relying on -race, which forces
+# it) because `go tool covdata` refuses to merge data recorded under
+# different counter modes ("counter mode clash"): every *-coverage target
+# and ccm-test-coverage need to agree, not just test-unit-coverage, which is
+# the only one that would otherwise get atomic mode for free from -race.
+test-unit-coverage: .prepare-coverage-dir
+	@$(MAKE) test-unit COVER_ARGS="-cover -covermode=atomic -coverpkg=./... -args -test.gocoverdir=\"${COVERAGE_DIR}\""
+
+test-integration-scylla-coverage: .prepare-coverage-dir
+	@$(MAKE) test-integration-scylla COVER_BUILD_ARGS="-cover -covermode=atomic -coverpkg=./..." COVER_RUNTIME_ARGS="-test.gocoverdir=\"${COVERAGE_DIR}\""
+
+test-integration-cassandra-coverage: .prepare-coverage-dir
+	@$(MAKE) test-integration-cassandra COVER_BUILD_ARGS="-cover -covermode=atomic -coverpkg=./..." COVER_RUNTIME_ARGS="-test.gocoverdir=\"${COVERAGE_DIR}\""
+
+# internal/ccm's tests (the only tests the "ccm" build tag selects -- nothing
+# else in the module has a file gated by it) don't take any of the custom
+# flags test-integration-scylla passes (-distribution, -cluster, ...); its
+# test binary doesn't define them and would fail to parse them. It also needs
+# to be targeted directly rather than through ./...: `go test` stops
+# resolving its own flags (including the package pattern) at the first flag
+# it doesn't recognize, so a ./... alongside those custom flags silently
+# collapses to just ".", which is why reusing test-integration-scylla for
+# this never actually ran internal/ccm's tests.
+ccm-test-coverage: .prepare-coverage-dir
+	@go test -tags "ccm gocql_debug" -timeout=5m -v -cover -covermode=atomic -coverpkg=./... ./internal/ccm/... -args -test.gocoverdir="${COVERAGE_DIR}"
+
+# lz4 is a separate Go module (see its go.mod), so a single `go tool covdata`
+# invocation can't render both it and the root module together -- `go tool
+# cover` resolves source files against the module rooted at the current
+# directory, and a merged profile spanning two modules fails with "no
+# required module provides package ...". Filter per module with `-pkg` and
+# run `go tool cover` from within each module's own directory instead.
+coverage-report:
+	@echo "Generate coverage report"
+	go tool covdata textfmt -i="${COVERAGE_DIR}" -pkg="github.com/gocql/gocql/..." -o="${MAKEFILE_PATH}/coverage-root.out"
+	go tool covdata textfmt -i="${COVERAGE_DIR}" -pkg="github.com/scylladb/gocql/lz4/..." -o="${MAKEFILE_PATH}/coverage-lz4.out"
+ifeq ($(shell if [[ -n "$${GITHUB_STEP_SUMMARY}" ]]; then echo "running-in-workflow"; else echo "running-in-shell"; fi), running-in-workflow)
+	echo "### Coverage Report" >>$${GITHUB_STEP_SUMMARY}
+	echo '```' >>$${GITHUB_STEP_SUMMARY}
+	go tool covdata percent -i="${COVERAGE_DIR}" -pkg="github.com/gocql/gocql/..." | tee -a "$${GITHUB_STEP_SUMMARY}"
+	go tool cover -func="${MAKEFILE_PATH}/coverage-root.out" | tail -1 | sed 's/^total:/root module total:/' | tee -a "$${GITHUB_STEP_SUMMARY}"
+	go tool covdata percent -i="${COVERAGE_DIR}" -pkg="github.com/scylladb/gocql/lz4/..." | tee -a "$${GITHUB_STEP_SUMMARY}"
+	(cd lz4 && go tool cover -func="${MAKEFILE_PATH}/coverage-lz4.out") | tail -1 | sed 's/^total:/lz4 module total:/' | tee -a "$${GITHUB_STEP_SUMMARY}"
+	echo '```' >>"$${GITHUB_STEP_SUMMARY}"
+else
+	go tool covdata percent -i="${COVERAGE_DIR}" -pkg="github.com/gocql/gocql/..."
+	go tool cover -func="${MAKEFILE_PATH}/coverage-root.out" | tail -1 | sed 's/^total:/root module total:/'
+	go tool covdata percent -i="${COVERAGE_DIR}" -pkg="github.com/scylladb/gocql/lz4/..."
+	(cd lz4 && go tool cover -func="${MAKEFILE_PATH}/coverage-lz4.out") | tail -1 | sed 's/^total:/lz4 module total:/'
+endif
+	go tool cover -html="${MAKEFILE_PATH}/coverage-root.out" -o="${MAKEFILE_PATH}/coverage-root.html"
+	(cd lz4 && go tool cover -html="${MAKEFILE_PATH}/coverage-lz4.out" -o="${MAKEFILE_PATH}/coverage-lz4.html")
+
+clean-coverage:
+	rm -rf "${COVERAGE_DIR}" "${MAKEFILE_PATH}"/coverage-root.* "${MAKEFILE_PATH}"/coverage-lz4.*
+
+# The benchmarks are behind the `bench` build tag (and, in the root module, some
+# behind `unit`), so the tags have to be passed or `go test -bench` compiles and
+# runs almost nothing. `-run '^$$'` keeps this a benchmark-only run; the tests
+# themselves belong to test-unit.
+BENCH_OPTS = -tags "bench unit" -run '^$$' -bench=. -benchmem
 
 test-bench:
 	@echo "Run benchmark tests"
 ifeq ($(shell if [[ -n "$${GITHUB_STEP_SUMMARY}" ]]; then echo "running-in-workflow"; else echo "running-in-shell"; fi), running-in-workflow)
 	echo "### Benchmark Results" >>$${GITHUB_STEP_SUMMARY}
 	echo '```' >>"$${GITHUB_STEP_SUMMARY}"
-	echo go test -bench=. -benchmem ./...
-	go test -bench=. -benchmem ./... | tee -a >>"$${GITHUB_STEP_SUMMARY}"
+	echo go test ${BENCH_OPTS} ./...
+	go test ${BENCH_OPTS} ./... | tee -a >>"$${GITHUB_STEP_SUMMARY}"
+	echo go test -C lz4 ${BENCH_OPTS} ./...
+	go test -C lz4 ${BENCH_OPTS} ./... | tee -a >>"$${GITHUB_STEP_SUMMARY}"
 	echo '```' >>"$${GITHUB_STEP_SUMMARY}"
 else
-	go test -bench=. -benchmem ./...
+	go test ${BENCH_OPTS} ./...
+	go test -C lz4 ${BENCH_OPTS} ./...
 endif
 
-check: .prepare-golangci
+check-go-mod-drift:
+	@echo "Check Go module drift"
+	go mod tidy -diff
+	go mod tidy -C lz4 -diff
+	go mod tidy -C tests/bench -diff
+
+check: .prepare-golangci check-go-mod-drift
 	@echo "Build"
 	go build -tags all .
 	echo "Check linting"
 	${BIN_DIR}/golangci-lint run
 
-fix: .prepare-golangci
+fix-go-mod-drift:
+	@echo "Fix Go module drift"
+	go mod tidy
+	go mod tidy -C lz4
+	go mod tidy -C tests/bench
+
+fix: .prepare-golangci fix-go-mod-drift
 	@echo "Fix linting"
 	${BIN_DIR}/golangci-lint run --fix
 

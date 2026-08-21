@@ -1,81 +1,47 @@
+//go:build unit
+// +build unit
+
 package tablets
 
 import (
 	"fmt"
-	"math"
 	"runtime"
 	"sync/atomic"
 	"testing"
-
-	"github.com/gocql/gocql/internal/tests"
 )
 
 const tabletsCountMedium = 1500
 
-func BenchmarkTabletInfoList(b *testing.B) {
-	hosts := tests.GenerateHostNames(3)
-	tlist := createTablets("k", "t", hosts, 2, tabletsCountMedium, tabletsCountMedium)
-	tlist2 := createTablets("k", "t2", hosts, 2, tabletsCountMedium, tabletsCountMedium)
-	tlist3 := createTablets("k", "t3", hosts, 2, tabletsCountMedium, tabletsCountMedium)
-	tlist = append(tlist, tlist2...)
-	tlist = append(tlist, tlist3...)
+// BenchmarkFindReplicasUnsafeForToken measures the pure lookup+replica-return
+// path for a prepopulated CowTabletList.
+func BenchmarkFindReplicasUnsafeForToken(b *testing.B) {
+	for _, numTablets := range []int{1500, 10000} {
+		b.Run(fmt.Sprintf("Tablets%d", numTablets), func(b *testing.B) {
+			const rf = 3
+			const hostsCount = 6
+			hosts := GenerateHostUUIDs(hostsCount)
+			tl := NewCowTabletList()
+			defer tl.Close()
 
-	b.ResetTimer()
-
-	b.Run("FindTablets", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			tlist.FindTablets("k", "t3")
-		}
-	})
-
-	b.Run("FindTabletForToken", func(b *testing.B) {
-		tokens := tests.RandomTokens(getThreadSafeRnd(), b.N)
-		l, r := tlist.FindTablets("k", "t3")
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			tlist.FindTabletForToken(tokens[i], l, r)
-		}
-	})
-
-	b.Run("AddTabletToTabletsList", func(b *testing.B) {
-		b.Run("FromEmpty", func(b *testing.B) {
+			tl.BulkAddTablets(createTablets("ks", "tbl", hosts, rf, numTablets, int64(numTablets)))
+			tl.Flush()
 			runtime.GC()
-			var tlist TabletInfoList
-			indexes := tests.ShuffledIndexes(getRnd(), b.N)
-			multiplier := int64(math.MaxUint64 / uint64(b.N))
-			replicas := []ReplicaInfo{{hostId: "h1"}, {hostId: "h2"}, {hostId: "h3"}}
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				token := int64(indexes[i]) * multiplier
-				tlist = tlist.AddTabletToTabletsList(&TabletInfo{
-					keyspaceName: "k",
-					tableName:    "t3",
-					firstToken:   token - multiplier,
-					lastToken:    token,
-					replicas:     replicas,
-				})
-			}
-		})
+			b.ReportAllocs()
 
-		b.Run("NewTable", func(b *testing.B) {
-			runtime.GC()
-			tl := createTablets("k", "t1", tests.GenerateHostNames(3), 2, tabletsCountMedium, tabletsCountMedium)
-			indexes := tests.ShuffledIndexes(getRnd(), b.N)
-			multiplier := int64(math.MaxUint64 / uint64(b.N))
-			replicas := []ReplicaInfo{{hostId: "h1"}, {hostId: "h2"}, {hostId: "h3"}}
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				token := int64(indexes[i]) * multiplier
-				tl = tl.AddTabletToTabletsList(&TabletInfo{
-					keyspaceName: "k",
-					tableName:    "t3",
-					firstToken:   token - multiplier,
-					lastToken:    token,
-					replicas:     replicas,
-				})
-			}
+			rnd := getThreadSafeRnd()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					token := rnd.Int63()
+					replicas := tl.FindReplicasUnsafeForToken("ks", "tbl", token)
+					if len(replicas) != rf {
+						// Token may fall in a gap; that's fine for benchmarking.
+						_ = replicas
+					}
+				}
+			})
 		})
-	})
+	}
 }
 
 type opConfig struct {
@@ -146,7 +112,7 @@ func runCowTabletListTestSuit(b *testing.B, name string, hostsCount, parallelism
 
 func runSingleCowTabletListTest(b *testing.B, hostsCount, parallelism, rf, totalTablets, extraTables int, prepopulate bool, ratios opConfig) {
 	tokenRangeCount64 := int64(totalTablets)
-	hosts := tests.GenerateHostNames(hostsCount)
+	hosts := GenerateHostUUIDs(hostsCount)
 	targetKS := "kstarget"
 	targetTable := "ttarget"
 	removeKs := "ksremove"
@@ -155,6 +121,7 @@ func runSingleCowTabletListTest(b *testing.B, hostsCount, parallelism, rf, total
 	readyTablets := createTablets(removeKs, removeTable, hosts, rf, totalTablets, tokenRangeCount64)
 	b.SetParallelism(parallelism)
 	tl := NewCowTabletList()
+	defer tl.Close()
 	rnd := getThreadSafeRnd()
 	opID := atomic.Int64{}
 
@@ -166,18 +133,19 @@ func runSingleCowTabletListTest(b *testing.B, hostsCount, parallelism, rf, total
 		tl.BulkAddTablets(createTablets(targetKS, fmt.Sprintf("table-%d", i), hosts, rf, totalTablets, tokenRangeCount64))
 	}
 
+	tl.Flush()
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			id := opID.Add(1)
 			token := rnd.Int63()
-			tablet := tl.FindTabletForToken(targetKS, targetTable, token)
-			if tablet == nil || tablet.lastToken > token || tablet.firstToken < token {
+			tablet, found := tl.FindTabletForToken(targetKS, targetTable, token)
+			if found || tablet.lastToken < token || tablet.firstToken > token {
 				// If there is no tablet for token, emulate update, same way it is usually happening
 				firstToken := (token / tokenRangeCount64) * tokenRangeCount64
 				lastToken := firstToken + tokenRangeCount64
-				tl.AddTablet(&TabletInfo{
+				tl.AddTablet(TabletInfo{
 					keyspaceName: targetKS,
 					tableName:    targetTable,
 					firstToken:   firstToken,
@@ -187,7 +155,7 @@ func runSingleCowTabletListTest(b *testing.B, hostsCount, parallelism, rf, total
 			}
 			if ratios.opRemoveTable == 0 || ((ratios.opRemoveTable != -1) && id%ratios.opRemoveTable == 0) {
 				tl.BulkAddTablets(readyTablets)
-				tl.RemoveTabletsWithTableFromTabletsList(targetKS, removeTable)
+				tl.RemoveTabletsWithTable(targetKS, removeTable)
 			}
 			if ratios.opRemoveKeyspace == 0 || ((ratios.opRemoveKeyspace != -1) && id%ratios.opRemoveKeyspace == 0) {
 				tl.BulkAddTablets(readyTablets)

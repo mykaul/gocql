@@ -38,6 +38,8 @@ import (
 )
 
 func TestSessionAPI(t *testing.T) {
+	t.Parallel()
+
 	cfg := &ClusterConfig{}
 
 	s := &Session{
@@ -85,7 +87,7 @@ func TestSessionAPI(t *testing.T) {
 		t.Fatalf("expected qry.stmt to be 'test', got '%v'", qry.stmt)
 	}
 
-	boundQry := s.Bind("test", func(q *QueryInfo) ([]interface{}, error) {
+	boundQry := s.Bind("test", func(q *QueryInfo) ([]any, error) {
 		return nil, nil
 	})
 	if boundQry.binding == nil {
@@ -94,7 +96,7 @@ func TestSessionAPI(t *testing.T) {
 		t.Fatalf("expected qry.stmt to be 'test', got '%v'", boundQry.stmt)
 	}
 
-	itr := s.executeQuery(qry)
+	itr := qry.Iter()
 	if itr.err != ErrSessionNotReady {
 		t.Fatalf("expected itr.err to be '%v', got '%v'", ErrSessionNotReady, itr.err)
 	}
@@ -127,17 +129,20 @@ func (f funcQueryObserver) ObserveQuery(ctx context.Context, o ObservedQuery) {
 }
 
 func TestQueryBasicAPI(t *testing.T) {
+	t.Parallel()
+
 	qry := &Query{routingInfo: &queryRoutingInfo{}}
 
 	// Initiate host
 	ip := "127.0.0.1"
+	hostID := TimeUUID()
 
-	qry.metrics = preFilledQueryMetrics(map[string]*hostMetrics{ip: {Attempts: 0, TotalLatency: 0}})
+	qry.metrics = preFilledQueryMetrics(map[UUID]*hostMetrics{hostID: {Attempts: 0, TotalLatency: 0}})
 	if qry.Latency() != 0 {
 		t.Fatalf("expected Query.Latency() to return 0, got %v", qry.Latency())
 	}
 
-	qry.metrics = preFilledQueryMetrics(map[string]*hostMetrics{ip: {Attempts: 2, TotalLatency: 4}})
+	qry.metrics = preFilledQueryMetrics(map[UUID]*hostMetrics{hostID: {Attempts: 2, TotalLatency: 4}})
 	if qry.Attempts() != 2 {
 		t.Fatalf("expected Query.Attempts() to return 2, got %v", qry.Attempts())
 	}
@@ -199,19 +204,20 @@ func TestQueryBasicAPI(t *testing.T) {
 }
 
 func TestQueryShouldPrepare(t *testing.T) {
+	t.Parallel()
+
 	toPrepare := []string{"select * ", "INSERT INTO", "update table", "delete from", "begin batch"}
 	cantPrepare := []string{"create table", "USE table", "LIST keyspaces", "alter table", "drop table", "grant user", "revoke user"}
-	q := &Query{routingInfo: &queryRoutingInfo{}}
 
 	for i := 0; i < len(toPrepare); i++ {
-		q.stmt = toPrepare[i]
+		q := &Query{stmt: toPrepare[i], routingInfo: &queryRoutingInfo{}}
 		if !q.shouldPrepare() {
 			t.Fatalf("expected Query.shouldPrepare to return true, got false for statement '%v'", toPrepare[i])
 		}
 	}
 
 	for i := 0; i < len(cantPrepare); i++ {
-		q.stmt = cantPrepare[i]
+		q := &Query{stmt: cantPrepare[i], routingInfo: &queryRoutingInfo{}}
 		if q.shouldPrepare() {
 			t.Fatalf("expected Query.shouldPrepare to return false, got true for statement '%v'", cantPrepare[i])
 		}
@@ -219,6 +225,7 @@ func TestQueryShouldPrepare(t *testing.T) {
 }
 
 func TestBatchBasicAPI(t *testing.T) {
+	t.Parallel()
 
 	cfg := &ClusterConfig{RetryPolicy: &SimpleRetryPolicy{NumRetries: 2}}
 
@@ -246,9 +253,10 @@ func TestBatchBasicAPI(t *testing.T) {
 	}
 
 	ip := "127.0.0.1"
+	hostID := TimeUUID()
 
 	// Test attempts
-	b.metrics = preFilledQueryMetrics(map[string]*hostMetrics{ip: {Attempts: 1}})
+	b.metrics = preFilledQueryMetrics(map[UUID]*hostMetrics{hostID: {Attempts: 1}})
 	if b.Attempts() != 1 {
 		t.Fatalf("expected batch.Attempts() to return %v, got %v", 1, b.Attempts())
 	}
@@ -263,7 +271,7 @@ func TestBatchBasicAPI(t *testing.T) {
 		t.Fatalf("expected batch.Latency() to be 0, got %v", b.Latency())
 	}
 
-	b.metrics = preFilledQueryMetrics(map[string]*hostMetrics{ip: {Attempts: 1, TotalLatency: 4}})
+	b.metrics = preFilledQueryMetrics(map[UUID]*hostMetrics{hostID: {Attempts: 1, TotalLatency: 4}})
 	if b.Latency() != 4 {
 		t.Fatalf("expected batch.Latency() to return %v, got %v", 4, b.Latency())
 	}
@@ -288,7 +296,7 @@ func TestBatchBasicAPI(t *testing.T) {
 		t.Fatalf("expected batch.Entries[0].Args[0] to be 1, got %v", b.Entries[0].Args[0])
 	}
 
-	b.Bind("test2", func(q *QueryInfo) ([]interface{}, error) {
+	b.Bind("test2", func(q *QueryInfo) ([]any, error) {
 		return nil, nil
 	})
 
@@ -313,6 +321,8 @@ func TestBatchBasicAPI(t *testing.T) {
 }
 
 func TestConsistencyNames(t *testing.T) {
+	t.Parallel()
+
 	names := map[fmt.Stringer]string{
 		Any:         "ANY",
 		One:         "ONE",
@@ -335,6 +345,8 @@ func TestConsistencyNames(t *testing.T) {
 }
 
 func TestIsUseStatement(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		input string
 		exp   bool
@@ -379,6 +391,8 @@ func (p *simpleTestRetryPolycy) GetRetryType(error) RetryType {
 // - return error is not nil on Rethrow, Ignore
 // - observed error is not nil
 func TestRetryType_IgnoreRethrow(t *testing.T) {
+	t.Parallel()
+
 	session := createSession(t)
 	defer session.Close()
 
@@ -485,6 +499,8 @@ func withSessionCache(cache tls.ClientSessionCache) func(config *ClusterConfig) 
 }
 
 func TestTLSTicketResumption(t *testing.T) {
+	t.Parallel()
+
 	t.Skip("TLS ticket resumption is only supported by 2025.2 and later")
 
 	c := newSessionCache()

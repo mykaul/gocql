@@ -29,6 +29,7 @@ package gocql
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"testing"
 )
@@ -36,10 +37,10 @@ import (
 func TestPlacementStrategy_SimpleStrategy(t *testing.T) {
 	t.Parallel()
 
-	host0 := &HostInfo{hostId: "0"}
-	host25 := &HostInfo{hostId: "25"}
-	host50 := &HostInfo{hostId: "50"}
-	host75 := &HostInfo{hostId: "75"}
+	host0 := &HostInfo{hostId: tUUID(0)}
+	host25 := &HostInfo{hostId: tUUID(25)}
+	host50 := &HostInfo{hostId: tUUID(50)}
+	host75 := &HostInfo{hostId: tUUID(75)}
 
 	tokens := []hostToken{
 		{intToken(0), host0},
@@ -133,17 +134,20 @@ func TestPlacementStrategy_NetworkStrategy(t *testing.T) {
 				tokens []hostToken
 			)
 			dcRing := make(map[string][]hostToken, totalDCs)
+			hostIdx := 0
 			for i := 0; i < totalDCs; i++ {
 				var dcTokens []hostToken
 				dc := fmt.Sprintf("dc%d", i+1)
 
 				for j := 0; j < hostsPerDC; j++ {
 					rack := fmt.Sprintf("rack%d", (j%racksPerDC)+1)
+					tokenStr := fmt.Sprintf("%s:%s:%d", dc, rack, j)
 
-					h := &HostInfo{hostId: fmt.Sprintf("%s:%s:%d", dc, rack, j), dataCenter: dc, rack: rack}
+					h := &HostInfo{hostId: tUUID(hostIdx), dataCenter: dc, rack: rack}
+					hostIdx++
 
 					token := hostToken{
-						token: orderedToken([]byte(h.hostId)),
+						token: orderedToken(tokenStr),
 						host:  h,
 					}
 
@@ -233,4 +237,74 @@ func TestPlacementStrategy_NetworkStrategy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTokenRingReplicas_ReplicasForInt64MatchesReplicasFor checks replicasForInt64
+// matches replicasFor for every query token, including boundaries and wraparound.
+func TestTokenRingReplicas_ReplicasForInt64MatchesReplicasFor(t *testing.T) {
+	t.Parallel()
+
+	host0 := &HostInfo{hostId: tUUID(0)}
+	host1 := &HostInfo{hostId: tUUID(1)}
+	host2 := &HostInfo{hostId: tUUID(2)}
+
+	replicas := tokenRingReplicas{
+		{token: int64Token(-100), hosts: []*HostInfo{host0}},
+		{token: int64Token(0), hosts: []*HostInfo{host1}},
+		{token: int64Token(100), hosts: []*HostInfo{host2}},
+	}
+
+	queries := []int64Token{
+		math.MinInt64, -1000, -101, -100, -99, -50, -1,
+		0, 1, 50, 99, 100, 101, 1000, math.MaxInt64,
+	}
+	for _, q := range queries {
+		want := replicas.replicasFor(q)
+		got := replicas.replicasForInt64(q)
+		if want != got {
+			t.Errorf("token %d: replicasFor=%p (ring token %v) replicasForInt64=%p (ring token %v) diverge",
+				q, want, tokensOf(want), got, tokensOf(got))
+		}
+	}
+}
+
+// tokensOf is a small test helper to render a *hostTokens' token for
+// error messages without panicking on nil.
+func tokensOf(h *hostTokens) any {
+	if h == nil {
+		return nil
+	}
+	return h.token
+}
+
+func TestTokenRingReplicas_ReplicasForInt64_EmptyRing(t *testing.T) {
+	t.Parallel()
+
+	var replicas tokenRingReplicas
+	if got := replicas.replicasForInt64(42); got != nil {
+		t.Fatalf("expected nil for an empty ring, got %v", got)
+	}
+}
+
+// TestTokenRingReplicas_ReplicasForInt64_MismatchedTokenTypePanicsLikeReplicasFor
+// checks a mismatched ring token type panics the same way replicasFor does.
+func TestTokenRingReplicas_ReplicasForInt64_MismatchedTokenTypePanicsLikeReplicasFor(t *testing.T) {
+	t.Parallel()
+
+	host0 := &HostInfo{hostId: tUUID(0)}
+	replicas := tokenRingReplicas{
+		{token: intToken(0), hosts: []*HostInfo{host0}},
+	}
+
+	mustPanic := func(t *testing.T, name string, fn func()) {
+		defer func() {
+			if recover() == nil {
+				t.Errorf("%s: expected a panic from the mismatched Token type, got none", name)
+			}
+		}()
+		fn()
+	}
+
+	mustPanic(t, "replicasFor", func() { replicas.replicasFor(int64Token(50)) })
+	mustPanic(t, "replicasForInt64", func() { replicas.replicasForInt64(int64Token(50)) })
 }

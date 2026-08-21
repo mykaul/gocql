@@ -35,13 +35,17 @@ func (p scyllaCDCPartitioner) Name() string {
 }
 
 func (p scyllaCDCPartitioner) Hash(partitionKey []byte) Token {
+	return int64Token(p.hashInt64(partitionKey))
+}
+
+func (p scyllaCDCPartitioner) hashInt64(partitionKey []byte) int64 {
 	if len(partitionKey) < 8 {
 		// The key is too short to extract any sensible token,
 		// so return the min token instead
 		if debug.Enabled {
 			p.logger.Printf("scylla: cdc partition key too short: %d < 8", len(partitionKey))
 		}
-		return scyllaCDCMinToken
+		return int64(scyllaCDCMinToken)
 	}
 
 	upperQword := binary.BigEndian.Uint64(partitionKey[0:])
@@ -69,8 +73,10 @@ func (p scyllaCDCPartitioner) Hash(partitionKey []byte) Token {
 		}
 	}
 
-	return int64Token(upperQword)
+	return int64(upperQword)
 }
+
+var _ int64Hasher = scyllaCDCPartitioner{}
 
 func (p scyllaCDCPartitioner) ParseString(str string) Token {
 	return parseInt64Token(str)
@@ -82,15 +88,10 @@ func scyllaIsCdcTable(session *Session, keyspaceName, tableName string) (bool, e
 		return false, nil
 	}
 
-	// Get the table metadata to see if it has the cdc partitioner set
-	keyspaceMeta, err := session.KeyspaceMetadata(keyspaceName)
+	// Check if the table has the CDC partitioner set.
+	tableMeta, err := session.TableMetadata(keyspaceName, tableName)
 	if err != nil {
 		return false, err
-	}
-
-	tableMeta, ok := keyspaceMeta.Tables[tableName]
-	if !ok {
-		return false, ErrNoMetadata
 	}
 
 	return tableMeta.Options.Partitioner == scyllaCDCPartitionerFullName, nil

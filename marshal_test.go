@@ -51,7 +51,7 @@ type AliasUint64 uint64
 var marshalTests = []struct {
 	Info           TypeInfo
 	Data           []byte
-	Value          interface{}
+	Value          any
 	MarshalError   error
 	UnmarshalError error
 }{
@@ -73,7 +73,7 @@ var marshalTests = []struct {
 var unmarshalTests = []struct {
 	Info           TypeInfo
 	Data           []byte
-	Value          interface{}
+	Value          any
 	UnmarshalError error
 }{
 	{
@@ -86,7 +86,11 @@ var unmarshalTests = []struct {
 			l := []int{1, 2}
 			return &l
 		}(),
-		unmarshalErrorf("unmarshal list: unexpected eof"),
+		// A count of 2 needs at least 2*4=8 remaining bytes (one 4-byte
+		// length prefix per element); only 6 remain, so this is now rejected
+		// up front by the size-vs-buffer guard, before attempting to read
+		// any element and hitting the old "unexpected eof".
+		unmarshalErrorf("unmarshal list: invalid size 2"),
 	},
 }
 
@@ -224,7 +228,7 @@ func TestMarshalList(t *testing.T) {
 		if unmarshalErr := Unmarshal(testCases[i].typeInfo, listData, &outputList); nil != unmarshalErr {
 			t.Error(unmarshalErr)
 		}
-		resultList := []interface{}{}
+		resultList := []any{}
 		for i := range outputList {
 			if outputList[i] != nil {
 				resultList = append(resultList, *outputList[i])
@@ -333,16 +337,16 @@ func TestMarshalTuple(t *testing.T) {
 	testCases := []struct {
 		name       string
 		expected   []byte
-		value      interface{}
-		checkValue interface{}
-		check      func(*testing.T, interface{})
+		value      any
+		checkValue any
+		check      func(*testing.T, any)
 	}{
 		{
 			name:       "interface-slice:two-strings",
 			expected:   []byte("\x00\x00\x00\x03foo\x00\x00\x00\x03bar"),
-			value:      []interface{}{"foo", "bar"},
-			checkValue: []interface{}{&s1, &s2},
-			check: func(t *testing.T, v interface{}) {
+			value:      []any{"foo", "bar"},
+			checkValue: []any{&s1, &s2},
+			check: func(t *testing.T, v any) {
 				checkString(t, "foo", *s1)
 				checkString(t, "bar", *s2)
 			},
@@ -350,9 +354,9 @@ func TestMarshalTuple(t *testing.T) {
 		{
 			name:       "interface-slice:one-string-one-nil-string",
 			expected:   []byte("\x00\x00\x00\x03foo\xff\xff\xff\xff"),
-			value:      []interface{}{"foo", nil},
-			checkValue: []interface{}{&s1, &s2},
-			check: func(t *testing.T, v interface{}) {
+			value:      []any{"foo", nil},
+			checkValue: []any{&s1, &s2},
+			check: func(t *testing.T, v any) {
 				checkString(t, "foo", *s1)
 				if s2 != nil {
 					t.Errorf("expected string to be nil, got %v", *s2)
@@ -367,7 +371,7 @@ func TestMarshalTuple(t *testing.T) {
 				B: stringToPtr("bar"),
 			},
 			checkValue: &tupleStruct{},
-			check: func(t *testing.T, v interface{}) {
+			check: func(t *testing.T, v any) {
 				got := v.(*tupleStruct)
 				if got.A != "foo" {
 					t.Errorf("expected A string to be %v, got %v", "foo", got.A)
@@ -385,7 +389,7 @@ func TestMarshalTuple(t *testing.T) {
 			expected:   []byte("\x00\x00\x00\x03foo\xff\xff\xff\xff"),
 			value:      tupleStruct{A: "foo", B: nil},
 			checkValue: &tupleStruct{},
-			check: func(t *testing.T, v interface{}) {
+			check: func(t *testing.T, v any) {
 				got := v.(*tupleStruct)
 				if got.A != "foo" {
 					t.Errorf("expected A string to be %v, got %v", "foo", got.A)
@@ -403,7 +407,7 @@ func TestMarshalTuple(t *testing.T) {
 				stringToPtr("bar"),
 			},
 			checkValue: &[2]*string{},
-			check: func(t *testing.T, v interface{}) {
+			check: func(t *testing.T, v any) {
 				got := v.(*[2]*string)
 				checkString(t, "foo", *(got[0]))
 				checkString(t, "bar", *(got[1]))
@@ -417,7 +421,7 @@ func TestMarshalTuple(t *testing.T) {
 				nil,
 			},
 			checkValue: &[2]*string{},
-			check: func(t *testing.T, v interface{}) {
+			check: func(t *testing.T, v any) {
 				got := v.(*[2]*string)
 				checkString(t, "foo", *(got[0]))
 				if got[1] != nil {
@@ -543,7 +547,7 @@ func TestMarshalUDTMap(t *testing.T) {
 	}
 
 	t.Run("partially bound", func(t *testing.T) {
-		value := map[string]interface{}{
+		value := map[string]any{
 			"y": 2,
 			"z": 3,
 		}
@@ -558,7 +562,7 @@ func TestMarshalUDTMap(t *testing.T) {
 		}
 	})
 	t.Run("partially bound from the beginning", func(t *testing.T) {
-		value := map[string]interface{}{
+		value := map[string]any{
 			"x": 1,
 			"y": 2,
 		}
@@ -573,7 +577,7 @@ func TestMarshalUDTMap(t *testing.T) {
 		}
 	})
 	t.Run("fully bound", func(t *testing.T) {
-		value := map[string]interface{}{
+		value := map[string]any{
 			"x": 1,
 			"y": 2,
 			"z": 3,
@@ -857,7 +861,7 @@ func TestUnmarshalUDT(t *testing.T) {
 		bytesWithLength([]byte("Hello")),    // first
 		bytesWithLength([]byte("\x00\x2a")), // second
 	)
-	value := map[string]interface{}{}
+	value := map[string]any{}
 	expectedErr := unmarshalErrorf("can not unmarshal into non-pointer map[string]interface {}")
 
 	if err := Unmarshal(info, data, value); err != expectedErr {
@@ -866,7 +870,59 @@ func TestUnmarshalUDT(t *testing.T) {
 	}
 }
 
-// TestUnmarshalListIntoInterface tests that lists can be unmarshaled into *interface{}
+// TestUnmarshalUDTIntoInterface tests that UDTs can be unmarshaled into *any.
+// This is used by MapScan when the destination map has a pre-existing entry
+// for a UDT column (the value is an any, so Scan receives *any).
+func TestUnmarshalUDTIntoInterface(t *testing.T) {
+	t.Parallel()
+
+	info := UDTTypeInfo{
+		NativeType: NativeType{proto: protoVersion4, typ: TypeUDT},
+		Name:       "myudt",
+		KeySpace:   "myks",
+		Elements: []UDTField{
+			{
+				Name: "first",
+				Type: NativeType{proto: protoVersion4, typ: TypeAscii},
+			},
+			{
+				Name: "second",
+				Type: NativeType{proto: protoVersion4, typ: TypeSmallInt},
+			},
+		},
+	}
+	data := append(
+		bytesWithLength([]byte("Hello")),       // first
+		bytesWithLength([]byte("\x00\x2a"))..., // second
+	)
+
+	var dest any
+	if err := Unmarshal(info, data, &dest); err != nil {
+		t.Fatalf("Unmarshal into *any failed: %v", err)
+	}
+
+	result, ok := dest.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", dest)
+	}
+	if result["first"] != "Hello" {
+		t.Errorf("expected first=Hello, got %v", result["first"])
+	}
+	if result["second"] != int16(42) {
+		t.Errorf("expected second=42, got %v (%T)", result["second"], result["second"])
+	}
+
+	// nil data should produce nil
+	var dest2 any
+	if err := Unmarshal(info, nil, &dest2); err != nil {
+		t.Fatalf("Unmarshal nil into *any failed: %v", err)
+	}
+	if dest2 != nil {
+		t.Errorf("expected nil for nil data, got %v", dest2)
+	}
+}
+
+// TestUnmarshalListIntoInterface tests that lists can be unmarshaled into *any
 // This is used by MapScan and SliceMap functions.
 func TestUnmarshalListIntoInterface(t *testing.T) {
 	t.Parallel()
@@ -887,7 +943,7 @@ func TestUnmarshalListIntoInterface(t *testing.T) {
 		Elem:       NativeType{proto: protoVersion4, typ: TypeInt},
 	}
 
-	var result interface{}
+	var result any
 	if err := Unmarshal(info, data, &result); err != nil {
 		t.Fatalf("Unmarshal failed: %v", err)
 	}
@@ -908,7 +964,7 @@ func TestUnmarshalListIntoInterface(t *testing.T) {
 	}
 }
 
-// TestUnmarshalMapIntoInterface tests that maps can be unmarshaled into *interface{}
+// TestUnmarshalMapIntoInterface tests that maps can be unmarshaled into *any
 // This is used by MapScan and SliceMap functions.
 func TestUnmarshalMapIntoInterface(t *testing.T) {
 	t.Parallel()
@@ -933,7 +989,7 @@ func TestUnmarshalMapIntoInterface(t *testing.T) {
 		Elem:       NativeType{proto: protoVersion4, typ: TypeInt},
 	}
 
-	var result interface{}
+	var result any
 	if err := Unmarshal(info, data, &result); err != nil {
 		t.Fatalf("Unmarshal failed: %v", err)
 	}
@@ -955,7 +1011,7 @@ func TestUnmarshalMapIntoInterface(t *testing.T) {
 }
 
 // TestUnmarshalListWithVectorIntoInterface tests that lists containing vectors
-// can be unmarshaled into *interface{} (issue #692)
+// can be unmarshaled into *any (issue #692)
 func TestUnmarshalListWithVectorIntoInterface(t *testing.T) {
 	t.Parallel()
 
@@ -995,7 +1051,7 @@ func TestUnmarshalListWithVectorIntoInterface(t *testing.T) {
 		},
 	}
 
-	var result interface{}
+	var result any
 	if err := Unmarshal(info, data, &result); err != nil {
 		t.Fatalf("Unmarshal failed: %v", err)
 	}
@@ -1034,4 +1090,302 @@ func bytesWithLength(data ...[]byte) []byte {
 		buf = buf[n:]
 	}
 	return ret
+}
+
+func TestUnmarshalVectorZeroDimensions(t *testing.T) {
+	info := VectorType{
+		NativeType: NewCustomType(protoVersion4, TypeCustom, apacheCassandraTypePrefix+"VectorType"),
+		SubType:    NativeType{proto: protoVersion4, typ: TypeFloat},
+		Dimensions: 0,
+	}
+
+	t.Run("nil_data", func(t *testing.T) {
+		var result []float32
+		if err := unmarshalVector(info, nil, &result); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("empty_data", func(t *testing.T) {
+		var result []float32
+		if err := unmarshalVector(info, []byte{}, &result); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result == nil {
+			t.Fatal("expected non-nil empty slice")
+		}
+		if len(result) != 0 {
+			t.Fatalf("expected len 0, got %d", len(result))
+		}
+	})
+
+	t.Run("nonempty_data_errors", func(t *testing.T) {
+		var result []float32
+		err := unmarshalVector(info, []byte{0x01, 0x02}, &result)
+		if err == nil {
+			t.Fatal("expected error for non-empty data with 0 dimensions")
+		}
+		if !strings.Contains(err.Error(), "0-dimension") {
+			t.Fatalf("expected error mentioning 0-dimension, got: %v", err)
+		}
+	})
+
+	t.Run("empty_data_into_zero_length_array", func(t *testing.T) {
+		var result [0]float32
+		if err := unmarshalVector(info, []byte{}, &result); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("empty_data_into_nonzero_length_array_errors", func(t *testing.T) {
+		var result [5]float32
+		err := unmarshalVector(info, []byte{}, &result)
+		if err == nil {
+			t.Fatal("expected error for 0-dimension vector into non-zero-length array")
+		}
+		if !strings.Contains(err.Error(), "array of size 5") {
+			t.Fatalf("expected error mentioning array size, got: %v", err)
+		}
+	})
+
+	t.Run("empty_data_into_interface", func(t *testing.T) {
+		var result any
+		if err := unmarshalVector(info, []byte{}, &result); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
+// TestNativeNewWithErrorConsistentWithGoType verifies that the fast-path type mapping
+// in NativeType.NewWithError() stays consistent with the canonical goType() mapping.
+// This guards against future changes to one mapping that forget to update the other.
+func TestNativeNewWithErrorConsistentWithGoType(t *testing.T) {
+	// All NativeType type codes that goType handles (excluding collection/tuple/UDT
+	// which are separate TypeInfo implementations).
+	nativeTypes := []Type{
+		TypeVarchar, TypeAscii, TypeText, TypeInet,
+		TypeBigInt, TypeCounter,
+		TypeTime,
+		TypeTimestamp,
+		TypeBlob,
+		TypeBoolean,
+		TypeFloat,
+		TypeDouble,
+		TypeInt,
+		TypeSmallInt,
+		TypeTinyInt,
+		TypeDecimal,
+		TypeUUID, TypeTimeUUID,
+		TypeVarint,
+		TypeDate,
+		TypeDuration,
+	}
+
+	for _, typ := range nativeTypes {
+		nt := NativeType{typ: typ, proto: protoVersion4}
+
+		// Get the fast-path result from NewWithError
+		fastVal, err := nt.NewWithError()
+		if err != nil {
+			t.Errorf("NewWithError(%s): unexpected error: %v", typ, err)
+			continue
+		}
+
+		// Get the canonical type from goType
+		canonicalType, err := goType(nt)
+		if err != nil {
+			t.Errorf("goType(%s): unexpected error: %v", typ, err)
+			continue
+		}
+
+		// NewWithError returns a pointer (reflect.New(typ).Interface()), so the
+		// underlying type is reflect.TypeOf(val).Elem()
+		fastType := reflect.TypeOf(fastVal)
+		if fastType.Kind() != reflect.Ptr {
+			t.Errorf("NewWithError(%s): expected pointer, got %s", typ, fastType.Kind())
+			continue
+		}
+		fastElemType := fastType.Elem()
+
+		if fastElemType != canonicalType {
+			t.Errorf("NewWithError(%s) fast-path type %s does not match goType() canonical type %s",
+				typ, fastElemType, canonicalType)
+		}
+	}
+}
+
+// TestCollectionNewWithErrorConsistentWithGoType verifies that the fast-path type mapping
+// in CollectionType.NewWithError() stays consistent with the canonical goType() mapping.
+func TestCollectionNewWithErrorConsistentWithGoType(t *testing.T) {
+	elemTypes := []Type{
+		TypeInt, TypeBigInt, TypeCounter,
+		TypeText, TypeVarchar, TypeAscii,
+		TypeBoolean,
+		TypeFloat, TypeDouble,
+		TypeUUID, TypeTimeUUID,
+		TypeTimestamp, TypeDate,
+		TypeSmallInt, TypeTinyInt,
+		TypeBlob,
+	}
+
+	// Test list and set types
+	for _, collTyp := range []Type{TypeList, TypeSet} {
+		for _, elemTyp := range elemTypes {
+			ct := CollectionType{
+				NativeType: NativeType{typ: collTyp, proto: protoVersion4},
+				Elem:       NativeType{typ: elemTyp, proto: protoVersion4},
+			}
+
+			fastVal, err := ct.NewWithError()
+			if err != nil {
+				t.Errorf("NewWithError(%s<%s>): unexpected error: %v", collTyp, elemTyp, err)
+				continue
+			}
+
+			canonicalType, err := goType(ct)
+			if err != nil {
+				t.Errorf("goType(%s<%s>): unexpected error: %v", collTyp, elemTyp, err)
+				continue
+			}
+
+			fastType := reflect.TypeOf(fastVal)
+			if fastType.Kind() != reflect.Ptr {
+				t.Errorf("NewWithError(%s<%s>): expected pointer, got %s", collTyp, elemTyp, fastType.Kind())
+				continue
+			}
+
+			if fastType.Elem() != canonicalType {
+				t.Errorf("NewWithError(%s<%s>) fast-path type %s does not match goType() canonical type %s",
+					collTyp, elemTyp, fastType.Elem(), canonicalType)
+			}
+		}
+	}
+
+	// Test map types with common key/value combinations
+	keyTypes := []Type{TypeText, TypeVarchar, TypeInt}
+	valTypes := []Type{
+		TypeInt, TypeBigInt,
+		TypeText, TypeVarchar,
+		TypeBoolean,
+		TypeFloat, TypeDouble,
+		TypeUUID,
+	}
+
+	for _, keyTyp := range keyTypes {
+		for _, valTyp := range valTypes {
+			ct := CollectionType{
+				NativeType: NativeType{typ: TypeMap, proto: protoVersion4},
+				Key:        NativeType{typ: keyTyp, proto: protoVersion4},
+				Elem:       NativeType{typ: valTyp, proto: protoVersion4},
+			}
+
+			fastVal, err := ct.NewWithError()
+			if err != nil {
+				t.Errorf("NewWithError(map<%s, %s>): unexpected error: %v", keyTyp, valTyp, err)
+				continue
+			}
+
+			canonicalType, err := goType(ct)
+			if err != nil {
+				t.Errorf("goType(map<%s, %s>): unexpected error: %v", keyTyp, valTyp, err)
+				continue
+			}
+
+			fastType := reflect.TypeOf(fastVal)
+			if fastType.Kind() != reflect.Ptr {
+				t.Errorf("NewWithError(map<%s, %s>): expected pointer, got %s", keyTyp, valTyp, fastType.Kind())
+				continue
+			}
+
+			if fastType.Elem() != canonicalType {
+				t.Errorf("NewWithError(map<%s, %s>) fast-path type %s does not match goType() canonical type %s",
+					keyTyp, valTyp, fastType.Elem(), canonicalType)
+			}
+		}
+	}
+}
+
+// TestUnmarshalListReflect_NegativeSize_ReturnsError guards against a
+// malformed frame with a negative list-count header reaching
+// reflect.MakeSlice, which panics on negative len. Uses a named slice type
+// to force the generic reflect path (the fast path's readListHeader already
+// rejects negative counts before this point).
+func TestUnmarshalListReflect_NegativeSize_ReturnsError(t *testing.T) {
+	t.Parallel()
+
+	type Strings []string
+	info := CollectionType{
+		NativeType: NativeType{proto: protoVersion4, typ: TypeList},
+		Elem:       NativeType{proto: protoVersion4, typ: TypeVarchar},
+	}
+	data := []byte{0xFF, 0xFF, 0xFF, 0xFF} // count = -1, no elements follow
+
+	var dst Strings
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unmarshalList panicked on negative size instead of returning an error: %v", r)
+		}
+	}()
+	if err := unmarshalList(info, data, &dst); err == nil {
+		t.Fatal("expected error for negative list size, got nil")
+	}
+}
+
+// TestUnmarshalListReflect_OversizedCount_RejectedBeforeAlloc verifies a list
+// header claiming far more elements than the buffer could contain is
+// rejected before reflect.MakeSlice attempts a huge allocation.
+func TestUnmarshalListReflect_OversizedCount_RejectedBeforeAlloc(t *testing.T) {
+	t.Parallel()
+
+	type Strings []string
+	info := CollectionType{
+		NativeType: NativeType{proto: protoVersion4, typ: TypeList},
+		Elem:       NativeType{proto: protoVersion4, typ: TypeVarchar},
+	}
+	// count = 1, but no element bytes follow: even a small count is rejected
+	// up front once it exceeds what the remaining buffer could hold, instead
+	// of risking a large allocation attempt if this test ever used a huge
+	// count and the guard regressed.
+	data := []byte{0x00, 0x00, 0x00, 0x01}
+
+	var dst Strings
+	err := unmarshalList(info, data, &dst)
+	if err == nil {
+		t.Fatal("expected error for oversized list count, got nil")
+	}
+	if err.Error() != "unmarshal list: invalid size 1" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dst != nil {
+		t.Fatalf("expected dst to remain nil, got %#v", dst)
+	}
+}
+
+// TestUnmarshalMapReflect_OversizedCount_RejectedBeforeAlloc verifies a map
+// header claiming far more entries than the buffer could contain is rejected
+// before reflect.MakeMapWithSize attempts a huge allocation. Uses a named map
+// type to force the generic reflect path.
+func TestUnmarshalMapReflect_OversizedCount_RejectedBeforeAlloc(t *testing.T) {
+	t.Parallel()
+
+	type StringMap map[string]string
+	info := CollectionType{
+		NativeType: NativeType{proto: protoVersion4, typ: TypeMap},
+		Key:        NativeType{proto: protoVersion4, typ: TypeVarchar},
+		Elem:       NativeType{proto: protoVersion4, typ: TypeVarchar},
+	}
+	// count = 1, but no entry bytes follow (same rationale as the list case).
+	data := []byte{0x00, 0x00, 0x00, 0x01}
+
+	var dst StringMap
+	err := unmarshalMap(info, data, &dst)
+	if err == nil {
+		t.Fatal("expected error for oversized map count, got nil")
+	}
+	if err.Error() != "unmarshal map: invalid size 1" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dst != nil {
+		t.Fatalf("expected dst to remain nil, got %#v", dst)
+	}
 }

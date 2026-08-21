@@ -11,6 +11,8 @@ import (
 
 // Check if session fail to start if DC name provided in the policy is wrong
 func TestDCValidationTokenAware(t *testing.T) {
+	t.Parallel()
+
 	cluster := createCluster()
 
 	fallback := DCAwareRoundRobinPolicy("WRONG_DC")
@@ -23,6 +25,8 @@ func TestDCValidationTokenAware(t *testing.T) {
 }
 
 func TestDCValidationDCAware(t *testing.T) {
+	t.Parallel()
+
 	cluster := createCluster()
 	cluster.PoolConfig.HostSelectionPolicy = DCAwareRoundRobinPolicy("WRONG_DC")
 
@@ -33,6 +37,8 @@ func TestDCValidationDCAware(t *testing.T) {
 }
 
 func TestDCValidationRackAware(t *testing.T) {
+	t.Parallel()
+
 	cluster := createCluster()
 	cluster.PoolConfig.HostSelectionPolicy = RackAwareRoundRobinPolicy("WRONG_DC", "RACK")
 
@@ -43,8 +49,10 @@ func TestDCValidationRackAware(t *testing.T) {
 }
 
 func TestTokenAwareHostPolicy(t *testing.T) {
+	t.Parallel()
+
 	t.Run("keyspace", func(t *testing.T) {
-		ks := "tokenaware_init_test"
+		ks := testKeyspaceName(t)
 		createKeyspace(t, createCluster(), ks, false)
 
 		policy := TokenAwareHostPolicy(RoundRobinHostPolicy())
@@ -89,7 +97,11 @@ func testIfPolicyInitializedProperly(t *testing.T, cluster *ClusterConfig, polic
 	}
 }
 
-// This test ensures  that when all hosts are down, the query execution does not hang.
+// TestNoHangAllHostsDown ensures that when all hosts are down, the query execution does not hang.
+// WARNING: This test must NOT use t.Parallel(). It sets ALL hosts to NodeDown state,
+// which mutates shared HostInfo objects visible to all concurrent sessions.
+//
+//nolint:paralleltest // mutates shared HostInfo state (sets all hosts to NodeDown)
 func TestNoHangAllHostsDown(t *testing.T) {
 	cluster := createCluster()
 	session := createSessionFromCluster(cluster, t)

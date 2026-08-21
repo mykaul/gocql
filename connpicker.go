@@ -24,6 +24,13 @@ type ConnPicker interface {
 	GetShardCount() int
 }
 
+// int64ConnPicker is an optional fast path on ConnPicker: shard-aware conn
+// selection from a raw int64 routing token, avoiding the Token interface
+// boxing. hostConnPool uses it when the routing token is an int64Token.
+type int64ConnPicker interface {
+	PickInt64(int64, ExecutableQuery) *Conn
+}
+
 type defaultConnPicker struct {
 	conns []*Conn
 	pos   uint32
@@ -82,17 +89,33 @@ func (p *defaultConnPicker) Close() {
 }
 
 func (p *defaultConnPicker) InFlight() int {
+	p.mu.RLock()
 	size := len(p.conns)
+	p.mu.RUnlock()
 	return size
 }
 
 func (p *defaultConnPicker) Size() (int, int) {
+	p.mu.RLock()
 	size := len(p.conns)
+	p.mu.RUnlock()
 	return size, p.size - size
 }
 
 func (p *defaultConnPicker) Pick(Token, ExecutableQuery) *Conn {
+	return p.pickLeastBusy()
+}
+
+// PickInt64 is the raw-int64 variant of Pick; the token is unused, the least
+// busy connection is picked either way.
+func (p *defaultConnPicker) PickInt64(int64, ExecutableQuery) *Conn {
+	return p.pickLeastBusy()
+}
+
+func (p *defaultConnPicker) pickLeastBusy() *Conn {
 	pos := int(atomic.AddUint32(&p.pos, 1) - 1)
+
+	p.mu.RLock()
 	size := len(p.conns)
 
 	var (
@@ -111,6 +134,7 @@ func (p *defaultConnPicker) Pick(Token, ExecutableQuery) *Conn {
 			streamsAvailable = streams
 		}
 	}
+	p.mu.RUnlock()
 
 	return leastBusyConn
 }
@@ -144,6 +168,10 @@ func (p nopConnPicker) GetShardCount() int {
 }
 
 func (nopConnPicker) Pick(Token, ExecutableQuery) *Conn {
+	return nil
+}
+
+func (nopConnPicker) PickInt64(int64, ExecutableQuery) *Conn {
 	return nil
 }
 

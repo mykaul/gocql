@@ -37,6 +37,8 @@ import (
 
 // Keyspace_table checks if Query.Keyspace() is updated based on prepared statement
 func TestKeyspaceTable(t *testing.T) {
+	t.Parallel()
+
 	cluster := createCluster()
 
 	fallback := RoundRobinHostPolicy()
@@ -49,8 +51,8 @@ func TestKeyspaceTable(t *testing.T) {
 
 	cluster.Keyspace = "wrong_keyspace"
 
-	keyspace := "test1"
-	table := "table1"
+	keyspace := testKeyspaceName(t)
+	table := testTableName(t)
 
 	err = createTable(session, `DROP KEYSPACE IF EXISTS `+keyspace)
 	if err != nil {
@@ -85,7 +87,7 @@ func TestKeyspaceTable(t *testing.T) {
 	ctx := context.Background()
 
 	// insert a row
-	if err := session.Query(`INSERT INTO test1.table1(pk, ck, v) VALUES (?, ?, ?)`,
+	if err := session.Query(fmt.Sprintf(`INSERT INTO %s.%s(pk, ck, v) VALUES (?, ?, ?)`, keyspace, table),
 		1, 2, 3).WithContext(ctx).Consistency(One).Exec(); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +96,7 @@ func TestKeyspaceTable(t *testing.T) {
 
 	/* Search for a specific set of records whose 'pk' column matches
 	 * the value of inserted row. */
-	qry := session.Query(`SELECT pk FROM test1.table1 WHERE pk = ? LIMIT 1`,
+	qry := session.Query(fmt.Sprintf(`SELECT pk FROM %s.%s WHERE pk = ? LIMIT 1`, keyspace, table),
 		1).WithContext(ctx).Consistency(One)
 	if err := qry.Scan(&pk); err != nil {
 		t.Fatal(err)
@@ -102,6 +104,6 @@ func TestKeyspaceTable(t *testing.T) {
 
 	// cluster.Keyspace was set to "wrong_keyspace", but during prepering statement
 	// Keyspace in Query should be changed to "test" and Table should be changed to table1
-	tests.AssertEqual(t, "qry.Keyspace()", "test1", qry.Keyspace())
-	tests.AssertEqual(t, "qry.Table()", "table1", qry.Table())
+	tests.AssertEqual(t, "qry.Keyspace()", keyspace, qry.Keyspace())
+	tests.AssertEqual(t, "qry.Table()", table, qry.Table())
 }

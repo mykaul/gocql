@@ -24,12 +24,15 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             /home/runner/.cache/pip
+            /home/runner/.local
             /home/runner/.ccm/scylla-repository
             /home/runner/.ccm/repository
             /home/runner/.sdkman
@@ -38,7 +41,7 @@ jobs:
           # CCM, scylla, cassandra and java versions are in Makefile
           key: pr-check-${{ runner.os }}-${{ hashFiles('Makefile') }}
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache-dependency-path: |
@@ -65,23 +68,26 @@ jobs:
     env:
       SCYLLA_VERSION: ${{ matrix.scylla-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.11'
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             /home/runner/.cache/pip
+            /home/runner/.local
             /home/runner/.sdkman
             testdata/pki
             bin/
           # CCM, pip and java versions are in Makefile
           key: pr-check-${{ runner.os }}-${{ hashFiles('Makefile') }}
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache-dependency-path: |
@@ -94,7 +100,7 @@ jobs:
         run: make resolve-scylla-version
 
       - name: Pull CCM image from the cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         if: steps.scylla-version.outputs.value != 'NOT-FOUND'
         id: ccm-cache
         with:
@@ -107,7 +113,7 @@ jobs:
 
       - name: Save CCM ScyllaDB image into the cache
         if: steps.ccm-cache.outputs.cache-hit != 'true' && steps.scylla-version.outputs.value != 'NOT-FOUND'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.ccm/repository
           key: ccm-scylla-${{ runner.os }}-${{ steps.scylla-version.outputs.value }}
@@ -130,25 +136,29 @@ jobs:
       fail-fast: false
     env:
       CASSANDRA_VERSION: ${{ matrix.cassandra-version }}
+      GH_TOKEN: ${{ github.token }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.11'
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             /home/runner/.cache/pip
+            /home/runner/.local
             /home/runner/.sdkman
             testdata/pki
             bin/
           # CCM, python and java versions are in Makefile
           key: pr-check-${{ runner.os }}-${{ hashFiles('Makefile') }}
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache-dependency-path: |
@@ -161,7 +171,7 @@ jobs:
         run: make resolve-cassandra-version
 
       - name: Pull CCM image from the cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         if: steps.cassandra-version.outputs.value != 'NOT-FOUND'
         id: ccm-cache
         with:
@@ -174,7 +184,7 @@ jobs:
 
       - name: Save CCM Cassandra image into the cache
         if: steps.ccm-cache.outputs.cache-hit != 'true' && steps.cassandra-version.outputs.value != 'NOT-FOUND'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.ccm/repository
           key: ccm-cassandra-${{ runner.os }}-${{ steps.cassandra-version.outputs.value }}
@@ -187,3 +197,19 @@ jobs:
         if: steps.cassandra-version.outputs.value != 'NOT-FOUND'
         run: TEST_INTEGRATION_TAGS="ccm gocql_debug" make test-integration-cassandra
 
+      # Native protocol v5 is never negotiated automatically (discoverProtocol caps at
+      # v4), so every ProtoVersion >= 5 integration test skips at the default
+      # TEST_CQL_PROTOCOL=4 — including the v5 half of the result-metadata-id exchange.
+      # Run that one test explicitly. Scoped with -run rather than a full v5 lane so a
+      # gap in an unrelated v5 test cannot block unrelated work; the full lane is #960.
+      #
+      # TEST_COMPRESSOR is not optional here: the default is snappy, and
+      # ClusterConfig.Validate rejects any compressor that is not a SegmentCompressor
+      # once ProtoVersion >= 5, which would fail every session in the suite.
+      - name: Run proto-5 result-metadata-id tests with Cassandra ${{ matrix.cassandra-version }}(${{ steps.cassandra-version.outputs.value }})
+        if: matrix.cassandra-version == '5-LATEST' && steps.cassandra-version.outputs.value != 'NOT-FOUND'
+        run: |
+          TEST_CQL_PROTOCOL=5 \
+          TEST_COMPRESSOR=no-compression \
+          TEST_OPTS="-run TestPrepareExecuteMetadataChangedFlag" \
+          make test-integration-cassandra

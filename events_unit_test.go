@@ -24,6 +24,7 @@ package gocql
 import (
 	"fmt"
 	"log"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -100,7 +101,7 @@ var columnMeta = resultMetadata{
 	colCount:       6,
 }
 
-func mustMarshal(info TypeInfo, value interface{}) []byte {
+func mustMarshal(info TypeInfo, value any) []byte {
 	b, err := Marshal(info, value)
 	if err != nil {
 		panic(fmt.Sprintf("mustMarshal(%v, %v): %v", info, value, err))
@@ -108,7 +109,7 @@ func mustMarshal(info TypeInfo, value interface{}) []byte {
 	return b
 }
 
-func marshalRow(meta resultMetadata, values []interface{}) [][]byte {
+func marshalRow(meta resultMetadata, values []any) [][]byte {
 	if len(meta.columns) != len(values) {
 		panic(fmt.Sprintf("marshalRow: column count %d != value count %d", len(meta.columns), len(values)))
 	}
@@ -124,11 +125,11 @@ func makeKeyspaceRow(durableWrites bool) [][]byte {
 		"class":              "org.apache.cassandra.locator.SimpleStrategy",
 		"replication_factor": "1",
 	}
-	return marshalRow(keyspaceMeta, []interface{}{durableWrites, replication})
+	return marshalRow(keyspaceMeta, []any{durableWrites, replication})
 }
 
 func makeTableRow(tableName string) [][]byte {
-	return marshalRow(tableMeta, []interface{}{
+	return marshalRow(tableMeta, []any{
 		tableName,              // table_name
 		float64(0.01),          // bloom_filter_fp_chance
 		map[string]string(nil), // caching
@@ -148,7 +149,7 @@ func makeTableRow(tableName string) [][]byte {
 }
 
 func makeColumnRow(tableName, colName, kind string, position int) [][]byte {
-	return marshalRow(columnMeta, []interface{}{
+	return marshalRow(columnMeta, []any{
 		tableName, // table_name
 		colName,   // column_name
 		"none",    // clustering_order
@@ -203,7 +204,7 @@ func (m *schemaDataMock) awaitSchemaAgreement() error {
 	return nil
 }
 
-func (m *schemaDataMock) query(statement string, values ...interface{}) *Iter {
+func (m *schemaDataMock) query(statement string, values ...any) *Iter {
 	m.mu.Lock()
 	m.queries = append(m.queries, queryRecord{method: "query", stmt: statement})
 	delay := m.queryDelay
@@ -216,7 +217,7 @@ func (m *schemaDataMock) query(statement string, values ...interface{}) *Iter {
 	return &Iter{}
 }
 
-func (m *schemaDataMock) querySystem(statement string, values ...interface{}) *Iter {
+func (m *schemaDataMock) querySystem(statement string, values ...any) *Iter {
 	m.mu.Lock()
 	m.queries = append(m.queries, queryRecord{method: "querySystem", stmt: statement})
 	delay := m.queryDelay
@@ -271,7 +272,7 @@ func (m *schemaDataMock) querySystem(statement string, values ...interface{}) *I
 		return &Iter{}
 	}
 
-	if strings.HasPrefix(statement, "SELECT * FROM system_schema.columns WHERE keyspace_name = ?") &&
+	if strings.HasPrefix(statement, "SELECT "+columnMetadataColumns+" FROM system_schema.columns WHERE keyspace_name = ?") &&
 		!strings.Contains(statement, "AND table_name") {
 		ksName, _ := values[0].(string)
 		tables, ok := m.knownKeyspaces[ksName]
@@ -296,7 +297,7 @@ func (m *schemaDataMock) querySystem(statement string, values ...interface{}) *I
 		}
 	}
 
-	if strings.HasPrefix(statement, "SELECT * FROM system_schema.columns WHERE keyspace_name = ? AND table_name = ?") {
+	if strings.HasPrefix(statement, "SELECT "+columnMetadataColumns+" FROM system_schema.columns WHERE keyspace_name = ? AND table_name = ?") {
 		ksName, _ := values[0].(string)
 		tblName, _ := values[1].(string)
 		tables, ok := m.knownKeyspaces[ksName]
@@ -375,6 +376,9 @@ func newSchemaEventTestSession(control controlConnection, policy HostSelectionPo
 			tabletsMetadata: tablets.NewCowTabletList(),
 		},
 	}
+	runtime.SetFinalizer(s, func(s *Session) {
+		s.Close()
+	})
 	return s
 }
 
@@ -450,6 +454,7 @@ func addTestTablets(t *testing.T, session *Session, ksName, tblName string) {
 	}
 	session.metadataDescriber.AddTablet(t1)
 	session.metadataDescriber.AddTablet(t2)
+	session.metadataDescriber.metadata.tabletsMetadata.Flush()
 }
 
 func TestHandleSchemaEvent(t *testing.T) {
@@ -596,6 +601,7 @@ func TestHandleSchemaEvent(t *testing.T) {
 				t.Parallel()
 				ctrl := &schemaDataMock{knownKeyspaces: map[string][]tableInfo{}}
 				s := newSchemaEventTestSessionWithMock(ctrl)
+				defer s.Close()
 				for ks, tables := range tt.keyspaces {
 					populateKeyspace(s, ks, tables...)
 				}
@@ -604,6 +610,7 @@ func TestHandleSchemaEvent(t *testing.T) {
 				}
 
 				s.handleSchemaEvent([]frame{tt.event})
+				s.metadataDescriber.metadata.tabletsMetadata.Flush()
 
 				for _, ks := range tt.wantKsGone {
 					if _, found := s.metadataDescriber.metadata.keyspaceMetadata.getKeyspace(ks); found {
@@ -682,6 +689,7 @@ func TestHandleSchemaEvent(t *testing.T) {
 				ctrl := &schemaDataMock{knownKeyspaces: map[string][]tableInfo{}}
 				policy := &trackingPolicy{}
 				s := newSchemaEventTestSession(ctrl, policy, "")
+				defer s.Close()
 				s.useSystemSchema = true
 				populateKeyspace(s, "test_ks", tt.populateTables...)
 
@@ -713,7 +721,7 @@ func TestHandleSchemaEvent(t *testing.T) {
 		return map[string]int{
 			"SELECT durable_writes, replication FROM system_schema.keyspaces WHERE keyspace_name = ?": 1,
 			"SELECT * FROM system_schema.tables WHERE keyspace_name = ?":                              1,
-			"SELECT * FROM system_schema.columns WHERE keyspace_name = ?":                             1,
+			"SELECT " + columnMetadataColumns + " FROM system_schema.columns WHERE keyspace_name = ?": 1,
 			"SELECT * FROM system_schema.types WHERE keyspace_name = ?":                               1,
 			"SELECT * FROM system_schema.indexes WHERE keyspace_name = ?":                             1,
 			"SELECT * FROM system_schema.views WHERE keyspace_name = ?":                               1,
@@ -721,10 +729,10 @@ func TestHandleSchemaEvent(t *testing.T) {
 		}
 	}
 	tableRefresh := map[string]int{
-		"SELECT * FROM system_schema.tables WHERE keyspace_name = ? AND table_name = ?":                     1,
-		"SELECT * FROM system_schema.columns WHERE keyspace_name = ? AND table_name = ?":                    1,
-		"SELECT * FROM system_schema.indexes WHERE keyspace_name = ? AND table_name = ?":                    1,
-		"SELECT * FROM system_schema.views WHERE keyspace_name = ? AND base_table_name = ? ALLOW FILTERING": 1,
+		"SELECT * FROM system_schema.tables WHERE keyspace_name = ? AND table_name = ?":                              1,
+		"SELECT " + columnMetadataColumns + " FROM system_schema.columns WHERE keyspace_name = ? AND table_name = ?": 1,
+		"SELECT * FROM system_schema.indexes WHERE keyspace_name = ? AND table_name = ?":                             1,
+		"SELECT * FROM system_schema.views WHERE keyspace_name = ? AND base_table_name = ? ALLOW FILTERING":          1,
 	}
 	noQueries := map[string]int{}
 
@@ -827,6 +835,7 @@ func TestHandleSchemaEvent(t *testing.T) {
 				}
 				ctrl := &schemaDataMock{knownKeyspaces: knownKs}
 				s := newSchemaEventTestSessionWithMock(ctrl)
+				defer s.Close()
 				if tt.disableSystemSchema {
 					s.useSystemSchema = false
 				}
@@ -946,6 +955,7 @@ func TestHandleSchemaEvent(t *testing.T) {
 				}
 				ctrl := &schemaDataMock{knownKeyspaces: knownKs}
 				s := newSchemaEventTestSessionWithMock(ctrl)
+				defer s.Close()
 				for ks, tables := range tt.populateKs {
 					populateKeyspace(s, ks, tables...)
 				}
@@ -995,6 +1005,7 @@ func TestHandleSchemaEvent(t *testing.T) {
 			},
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 		populateKeyspace(s, "test_ks", "tbl_a", "tbl_b", "tbl_c")
 
 		s.handleSchemaEvent([]frame{
@@ -1055,6 +1066,7 @@ func TestHandleSchemaEvent(t *testing.T) {
 		}
 		policy := &trackingPolicy{}
 		s := newSchemaEventTestSession(ctrl, policy, "")
+		defer s.Close()
 		s.useSystemSchema = true
 		s.hasAggregatesAndFunctions = false
 		populateKeyspace(s, "test_ks", "tbl_a")
@@ -1110,6 +1122,7 @@ func TestSchemaRefreshConcurrent(t *testing.T) {
 			queryDelay:     10 * time.Millisecond,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 
 		var wg sync.WaitGroup
 		for range concurrency {
@@ -1133,6 +1146,7 @@ func TestSchemaRefreshConcurrent(t *testing.T) {
 			queryDelay:     10 * time.Millisecond,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 		populateKeyspace(s, "test_ks", "tbl_a")
 
 		s.handleSchemaEvent([]frame{
@@ -1163,6 +1177,7 @@ func TestSchemaRefreshConcurrent(t *testing.T) {
 			queryDelay:     10 * time.Millisecond,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 		populateKeyspace(s, "test_ks", "tbl_a")
 
 		s.handleSchemaEvent([]frame{
@@ -1183,6 +1198,48 @@ func TestSchemaRefreshConcurrent(t *testing.T) {
 
 		if got := ctrl.getQueryCount(); got != tableRefreshCount {
 			t.Errorf("expected %d queries (single table refresh), got %d", tableRefreshCount, got)
+		}
+	})
+
+	t.Run("GetTable/stale_snapshot_after_refresh_does_not_refresh_twice", func(t *testing.T) {
+		t.Parallel()
+		ctrl := &schemaDataMock{
+			knownKeyspaces: knownKeyspaces,
+		}
+		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
+		populateKeyspace(s, "test_ks", "tbl_a")
+
+		s.handleSchemaEvent([]frame{
+			&frm.SchemaChangeTable{Change: "UPDATED", Keyspace: "test_ks", Object: "tbl_a"},
+		})
+
+		staleKeyspace, wasReloaded, err := s.metadataDescriber.getKeyspaceInternal("test_ks")
+		if err != nil {
+			t.Fatalf("getKeyspaceInternal returned unexpected error: %v", err)
+		}
+		if _, found := staleKeyspace.Tables["tbl_a"]; found {
+			t.Fatal("expected stale keyspace snapshot to have invalidated table removed")
+		}
+
+		if err := s.metadataDescriber.deduplicatedRefreshTable("test_ks", "tbl_a"); err != nil {
+			t.Fatalf("deduplicatedRefreshTable returned unexpected error: %v", err)
+		}
+
+		ctrl.resetQueries()
+
+		tbl, refreshNeeded, err := s.metadataDescriber.getTableFromSnapshot("test_ks", "tbl_a", staleKeyspace, wasReloaded)
+		if err != nil {
+			t.Fatalf("getTableFromSnapshot returned unexpected error: %v", err)
+		}
+		if refreshNeeded {
+			t.Fatal("expected latest published keyspace metadata to suppress an extra refresh")
+		}
+		if tbl == nil || tbl.Name != "tbl_a" {
+			t.Fatalf("unexpected table metadata: %#v", tbl)
+		}
+		if got := ctrl.getQueryCount(); got != 0 {
+			t.Fatalf("expected stale snapshot lookup to avoid extra queries, got %d", got)
 		}
 	})
 }
@@ -1210,6 +1267,7 @@ func TestConcurrentSchemaRefreshErrorHandling(t *testing.T) {
 			queryDelay:     10 * time.Millisecond,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 
 		var wg sync.WaitGroup
 		results := make([]*KeyspaceMetadata, concurrency)
@@ -1244,6 +1302,7 @@ func TestConcurrentSchemaRefreshErrorHandling(t *testing.T) {
 			queryError:     injectedErr,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 
 		var wg sync.WaitGroup
 		errs := make([]error, concurrency)
@@ -1274,6 +1333,7 @@ func TestConcurrentSchemaRefreshErrorHandling(t *testing.T) {
 			queryError:     injectedErr,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 
 		// Wave 1: all fail.
 		var wg sync.WaitGroup
@@ -1306,6 +1366,7 @@ func TestConcurrentSchemaRefreshErrorHandling(t *testing.T) {
 			queryDelay:     10 * time.Millisecond,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 
 		var wg sync.WaitGroup
 		errs := make([]error, concurrency)
@@ -1332,6 +1393,7 @@ func TestConcurrentSchemaRefreshErrorHandling(t *testing.T) {
 			queryDelay:     10 * time.Millisecond,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 		populateKeyspace(s, "test_ks", "tbl_a")
 		s.metadataDescriber.invalidateTableSchema("test_ks", "tbl_a")
 
@@ -1368,6 +1430,7 @@ func TestConcurrentSchemaRefreshErrorHandling(t *testing.T) {
 			queryDelay:     10 * time.Millisecond,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 		populateKeyspace(s, "test_ks", "tbl_a")
 		s.metadataDescriber.invalidateTableSchema("test_ks", "tbl_a")
 
@@ -1398,6 +1461,7 @@ func TestConcurrentSchemaRefreshErrorHandling(t *testing.T) {
 			queryError:     injectedErr,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 		populateKeyspace(s, "test_ks", "tbl_a")
 		s.metadataDescriber.invalidateTableSchema("test_ks", "tbl_a")
 
@@ -1434,6 +1498,7 @@ func TestConcurrentSchemaRefreshErrorHandling(t *testing.T) {
 			queryDelay:     10 * time.Millisecond,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 		populateKeyspace(s, "test_ks", "tbl_a")
 
 		var wg sync.WaitGroup
@@ -1463,6 +1528,7 @@ func TestConcurrentSchemaRefreshErrorHandling(t *testing.T) {
 			queryDelay:     5 * time.Millisecond,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 
 		var wg sync.WaitGroup
 		ksErrs := make([]error, concurrency)
@@ -1499,6 +1565,7 @@ func TestConcurrentSchemaRefreshErrorHandling(t *testing.T) {
 			queryDelay:     5 * time.Millisecond,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 		populateKeyspace(s, "test_ks", "tbl_a", "tbl_b")
 		s.metadataDescriber.invalidateTableSchema("test_ks", "tbl_a")
 		s.metadataDescriber.invalidateTableSchema("test_ks", "tbl_b")
@@ -1548,6 +1615,7 @@ func TestConcurrentSchemaRefreshErrorHandling(t *testing.T) {
 			queryDelay:     5 * time.Millisecond,
 		}
 		s := newSchemaEventTestSessionWithMock(ctrl)
+		defer s.Close()
 		populateKeyspace(s, "test_ks", "tbl_a", "tbl_x")
 		s.metadataDescriber.invalidateTableSchema("test_ks", "tbl_a")
 		s.metadataDescriber.invalidateTableSchema("test_ks", "tbl_x")

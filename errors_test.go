@@ -29,24 +29,29 @@ package gocql
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
 func TestErrorsParse(t *testing.T) {
+	t.Parallel()
+
 	session := createSession(t)
 	defer session.Close()
 
-	if err := createTable(session, `CREATE TABLE gocql_test.errors_parse (id int primary key)`); err != nil {
+	table := testTableName(t)
+
+	if err := createTable(session, fmt.Sprintf(`CREATE TABLE gocql_test.%s (id int primary key)`, table)); err != nil {
 		t.Fatal("create:", err)
 	}
 
-	if err := createTable(session, `CREATE TABLE gocql_test.errors_parse (id int primary key)`); err == nil {
+	if err := createTable(session, fmt.Sprintf(`CREATE TABLE gocql_test.%s (id int primary key)`, table)); err == nil {
 		t.Fatal("Should have gotten already exists error from cassandra server.")
 	} else {
 		e := &RequestErrAlreadyExists{}
 		if errors.As(err, &e) {
-			if e.Table != "errors_parse" {
-				t.Fatalf("expected error table to be 'errors_parse' but was %q", e.Table)
+			if e.Table != table {
+				t.Fatalf("expected error table to be %q but was %q", table, e.Table)
 			}
 		} else {
 			t.Fatalf("expected to get RequestErrAlreadyExists instead got %T", e)

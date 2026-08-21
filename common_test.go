@@ -27,8 +27,11 @@ package gocql
 import (
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net"
+	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -45,17 +48,29 @@ var (
 	flagAutoWait      = flag.Duration("autowait", 1000*time.Millisecond, "time to wait for autodiscovery to fill the hosts poll")
 	flagRunSslTest    = flag.Bool("runssl", false, "Set to true to run ssl test")
 	flagRunAuthTest   = flag.Bool("runauth", false, "Set to true to run authentication test")
-	flagCompressTest  = flag.String("compressor", "", "compressor to use")
+	flagCompressTest  = flag.String("compressor", "no-compression", "compressor to use")
 	flagTimeout       = flag.Duration("gocql.timeout", 5*time.Second, "sets the connection `timeout` for all operations")
 	flagClusterSocket = flag.String("cluster-socket", "", "nodes socket files separated by comma")
 	flagDistribution  = flag.String("distribution", "scylla", "database distribution - scylla or cassandra")
 	flagCassVersion   cassVersion
 )
 
+// integrationTestSetup is set by an init() in an integration-tagged file to run
+// one-time setup (e.g. tablet probes) before any test executes.
+var integrationTestSetup func()
+
 func init() {
 	flag.Var(&flagCassVersion, "gocql.cversion", "the cassandra version being tested against")
 
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
+}
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	if integrationTestSetup != nil {
+		integrationTestSetup()
+	}
+	os.Exit(m.Run())
 }
 
 func getClusterHosts() []string {
@@ -104,27 +119,24 @@ func (o *OnceManager) GetOnce(key string) *sync.Once {
 var initKeyspaceOnce = NewOnceManager()
 
 var isTabletsSupportedFlag *bool
-var isTabletsSupportedOnce sync.RWMutex
+var isTabletsSupportedOnce sync.Once
 
 func isTabletsSupported() bool {
-	isTabletsSupportedOnce.RLock()
-	if isTabletsSupportedFlag != nil {
-		isTabletsSupportedOnce.RUnlock()
-		return *isTabletsSupportedFlag
+	isTabletsSupportedOnce.Do(probeTabletsSupported)
+	if isTabletsSupportedFlag == nil {
+		return false
 	}
-	isTabletsSupportedOnce.RUnlock()
-	isTabletsSupportedOnce.Lock()
-	defer isTabletsSupportedOnce.Unlock()
-	if isTabletsSupportedFlag != nil {
-		return *isTabletsSupportedFlag
-	}
-	var result bool
+	return *isTabletsSupportedFlag
+}
 
+func probeTabletsSupported() {
 	s, err := createCluster().CreateSession()
 	if err != nil {
 		panic(fmt.Errorf("failed to create session: %v", err))
 	}
-	res := make(map[string]interface{})
+	defer s.Close()
+
+	res := make(map[string]any)
 	err = s.Query("select * from system.local").MapScan(res)
 	if err != nil {
 		panic(fmt.Errorf("failed to read system.local: %v", err))
@@ -134,36 +146,32 @@ func isTabletsSupported() bool {
 	featuresCasted, _ := features.(string)
 	for _, feature := range strings.Split(featuresCasted, ",") {
 		if feature == "TABLETS" {
-			result = true
+			result := true
 			isTabletsSupportedFlag = &result
-			return true
+			return
 		}
 	}
-	result = false
+	result := false
 	isTabletsSupportedFlag = &result
-	return false
 }
 
 var isTabletsAutoEnabledFlag *bool
-var isTabletsAutoEnabledOnce sync.RWMutex
+var isTabletsAutoEnabledOnce sync.Once
 
 func isTabletsAutoEnabled() bool {
-	isTabletsAutoEnabledOnce.RLock()
-	if isTabletsAutoEnabledFlag != nil {
-		isTabletsAutoEnabledOnce.RUnlock()
-		return *isTabletsAutoEnabledFlag
+	isTabletsAutoEnabledOnce.Do(probeTabletsAutoEnabled)
+	if isTabletsAutoEnabledFlag == nil {
+		return false
 	}
-	isTabletsAutoEnabledOnce.RUnlock()
-	isTabletsAutoEnabledOnce.Lock()
-	defer isTabletsAutoEnabledOnce.Unlock()
-	if isTabletsAutoEnabledFlag != nil {
-		return *isTabletsAutoEnabledFlag
-	}
+	return *isTabletsAutoEnabledFlag
+}
 
+func probeTabletsAutoEnabled() {
 	s, err := createCluster().CreateSession()
 	if err != nil {
 		panic(fmt.Errorf("failed to create session: %v", err))
 	}
+	defer s.Close()
 
 	err = s.Query("DROP KEYSPACE IF EXISTS gocql_check_tablets_enabled").Exec()
 	if err != nil {
@@ -171,29 +179,36 @@ func isTabletsAutoEnabled() bool {
 	}
 	err = s.Query("CREATE KEYSPACE gocql_check_tablets_enabled WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': '1'}").Exec()
 	if err != nil {
-		panic(fmt.Errorf("failed to delete keyspace: %v", err))
+		panic(fmt.Errorf("failed to create keyspace: %v", err))
 	}
 
-	res := make(map[string]interface{})
+	res := make(map[string]any)
 	err = s.Query("describe keyspace gocql_check_tablets_enabled").MapScan(res)
 	if err != nil {
-		panic(fmt.Errorf("failed to read system.local: %v", err))
+		panic(fmt.Errorf("failed to describe keyspace: %v", err))
+	}
+
+	err = s.Query("DROP KEYSPACE IF EXISTS gocql_check_tablets_enabled").Exec()
+	if err != nil {
+		panic(fmt.Errorf("failed to drop probe keyspace: %v", err))
 	}
 
 	createStmt, _ := res["create_statement"]
 	createStmtCasted, _ := createStmt.(string)
 	result := strings.Contains(strings.ToLower(createStmtCasted), "and tablets")
 	isTabletsAutoEnabledFlag = &result
-	return result
+}
+
+// initTabletProbes runs the tablet-support and tablet-auto-enabled probes eagerly.
+// Called from TestMain before any tests run to avoid races with parallel test startup.
+func initTabletProbes() {
+	probeTabletsSupported()
+	if isTabletsSupportedFlag != nil && *isTabletsSupportedFlag {
+		probeTabletsAutoEnabled()
+	}
 }
 
 func createTable(s *Session, table string) error {
-	// lets just be really sure
-	if err := s.control.awaitSchemaAgreement(); err != nil {
-		log.Printf("error waiting for schema agreement pre create table=%q err=%v\n", table, err)
-		return err
-	}
-
 	if err := s.Query(table).RetryPolicy(&SimpleRetryPolicy{NumRetries: 3}).Idempotent(true).Exec(); err != nil {
 		log.Printf("error creating table table=%q err=%v\n", table, err)
 		return err
@@ -204,7 +219,87 @@ func createTable(s *Session, table string) error {
 		return err
 	}
 
+	// Invalidate schema cache to avoid races with debounced schema events.
+	// Use per-table invalidation when possible (cheaper than keyspace-wide)
+	// to reduce cache thrashing when parallel tests all perform DDL on the
+	// same shared keyspace. Falls back to keyspace-wide invalidation for
+	// non-TABLE DDL (e.g. DROP KEYSPACE, CREATE TYPE).
+	ks, tbl := extractKeyspaceTableFromDDL(table)
+	if ks == "" {
+		ks = s.cfg.Keyspace
+	}
+	if ks != "" && tbl != "" {
+		s.metadataDescriber.invalidateTableSchema(ks, tbl)
+	} else if ks != "" {
+		s.metadataDescriber.invalidateKeyspaceSchema(ks)
+	}
+
 	return nil
+}
+
+// createTables executes multiple DDL statements with a single
+// awaitSchemaAgreement call at the end, reducing the serialization bottleneck
+// when parallel tests all need schema agreement. Each statement is still
+// executed and cache-invalidated individually.
+func createTables(s *Session, ddls ...string) error {
+	for _, ddl := range ddls {
+		if err := s.Query(ddl).RetryPolicy(&SimpleRetryPolicy{NumRetries: 3}).Idempotent(true).Exec(); err != nil {
+			log.Printf("error creating table table=%q err=%v\n", ddl, err)
+			return err
+		}
+	}
+
+	if err := s.control.awaitSchemaAgreement(); err != nil {
+		log.Printf("error waiting for schema agreement after batch DDL err=%v\n", err)
+		return err
+	}
+
+	// Invalidate caches for all affected tables/keyspaces.
+	for _, ddl := range ddls {
+		ks, tbl := extractKeyspaceTableFromDDL(ddl)
+		if ks == "" {
+			ks = s.cfg.Keyspace
+		}
+		if ks != "" && tbl != "" {
+			s.metadataDescriber.invalidateTableSchema(ks, tbl)
+		} else if ks != "" {
+			s.metadataDescriber.invalidateKeyspaceSchema(ks)
+		}
+	}
+
+	return nil
+}
+
+// extractKeyspaceTableFromDDL extracts the keyspace and table names from a DDL
+// statement like "CREATE TABLE gocql_test.table_name (...)".
+// Returns ("", "") for non-TABLE DDL or when keyspace is not qualified.
+func extractKeyspaceTableFromDDL(ddl string) (keyspace, table string) {
+	upper := strings.ToUpper(ddl)
+	idx := strings.Index(upper, "TABLE")
+	if idx < 0 {
+		return "", ""
+	}
+	rest := strings.TrimSpace(ddl[idx+len("TABLE"):])
+	// Skip optional "IF [NOT] EXISTS" between TABLE and the name.
+	upperRest := strings.ToUpper(rest)
+	if strings.HasPrefix(upperRest, "IF NOT EXISTS") {
+		rest = strings.TrimSpace(rest[len("IF NOT EXISTS"):])
+	} else if strings.HasPrefix(upperRest, "IF EXISTS") {
+		rest = strings.TrimSpace(rest[len("IF EXISTS"):])
+	}
+	// Extract keyspace.table
+	dot := strings.Index(rest, ".")
+	if dot < 0 {
+		return "", ""
+	}
+	ks := rest[:dot]
+	// Extract table name: everything after the dot until whitespace or '('
+	nameRest := rest[dot+1:]
+	end := strings.IndexAny(nameRest, " \t\n(")
+	if end < 0 {
+		return ks, nameRest
+	}
+	return ks, nameRest[:end]
 }
 
 func createCluster(opts ...func(*ClusterConfig)) *ClusterConfig {
@@ -222,7 +317,7 @@ func createCluster(opts ...func(*ClusterConfig)) *ClusterConfig {
 	switch *flagCompressTest {
 	case "snappy":
 		cluster.Compressor = &SnappyCompressor{}
-	case "":
+	case "no-compression", "":
 	default:
 		panic("invalid compressor: " + *flagCompressTest)
 	}
@@ -347,80 +442,172 @@ func createMaterializedViews(t *testing.T, session *Session) {
 	if flagCassVersion.Before(3, 0, 0) {
 		return
 	}
-	if err := session.Query(`CREATE TABLE IF NOT EXISTS gocql_test.view_table (
+	table1 := testTableName(t, "1")
+	table2 := testTableName(t, "2")
+	view1 := testTableName(t, "view1")
+	view2 := testTableName(t, "view2")
+	if err := session.Query(fmt.Sprintf(`CREATE TABLE IF NOT EXISTS gocql_test.%s (
 		    userid text,
 		    year int,
 		    month int,
-    		    PRIMARY KEY (userid));`).Exec(); err != nil {
+    		    PRIMARY KEY (userid));`, table1)).Exec(); err != nil {
 		t.Fatalf("failed to create materialized view with err: %v", err)
 	}
-	if err := session.Query(`CREATE TABLE IF NOT EXISTS gocql_test.view_table2 (
+	if err := session.Query(fmt.Sprintf(`CREATE TABLE IF NOT EXISTS gocql_test.%s (
 		    userid text,
 		    year int,
 		    month int,
-    		    PRIMARY KEY (userid));`).Exec(); err != nil {
+    		    PRIMARY KEY (userid));`, table2)).Exec(); err != nil {
 		t.Fatalf("failed to create materialized view with err: %v", err)
 	}
-	if err := session.Query(`CREATE MATERIALIZED VIEW IF NOT EXISTS gocql_test.view_view AS
+	if err := session.Query(fmt.Sprintf(`CREATE MATERIALIZED VIEW IF NOT EXISTS gocql_test.%s AS
 		   SELECT year, month, userid
-		   FROM gocql_test.view_table
+		   FROM gocql_test.%s
 		   WHERE year IS NOT NULL AND month IS NOT NULL AND userid IS NOT NULL
-		   PRIMARY KEY (userid, year);`).Exec(); err != nil {
+		   PRIMARY KEY (userid, year);`, view1, table1)).Exec(); err != nil {
 		t.Fatalf("failed to create materialized view with err: %v", err)
 	}
-	if err := session.Query(`CREATE MATERIALIZED VIEW IF NOT EXISTS gocql_test.view_view2 AS
+	if err := session.Query(fmt.Sprintf(`CREATE MATERIALIZED VIEW IF NOT EXISTS gocql_test.%s AS
 		   SELECT year, month, userid
-		   FROM gocql_test.view_table2
+		   FROM gocql_test.%s
 		   WHERE year IS NOT NULL AND month IS NOT NULL AND userid IS NOT NULL
-		   PRIMARY KEY (userid, year);`).Exec(); err != nil {
+		   PRIMARY KEY (userid, year);`, view2, table2)).Exec(); err != nil {
 		t.Fatalf("failed to create materialized view with err: %v", err)
 	}
 }
 
 func createFunctions(t *testing.T, session *Session) {
-	if err := session.Query(`
-		CREATE OR REPLACE FUNCTION gocql_test.avgState ( state tuple<int,bigint>, val int )
+	fnState := testTableName(t, "avgstate")
+	fnFinal := testTableName(t, "avgfinal")
+	if err := session.Query(fmt.Sprintf(`
+		CREATE OR REPLACE FUNCTION gocql_test.%s ( state tuple<int,bigint>, val int )
 		CALLED ON NULL INPUT
 		RETURNS tuple<int,bigint>
 		LANGUAGE java AS
-		$$if (val !=null) {state.setInt(0, state.getInt(0)+1); state.setLong(1, state.getLong(1)+val.intValue());}return state;$$;	`).Exec(); err != nil {
+		$$if (val !=null) {state.setInt(0, state.getInt(0)+1); state.setLong(1, state.getLong(1)+val.intValue());}return state;$$;	`, fnState)).Exec(); err != nil {
 		t.Fatalf("failed to create function with err: %v", err)
 	}
-	if err := session.Query(`
-		CREATE OR REPLACE FUNCTION gocql_test.avgFinal ( state tuple<int,bigint> )
+	if err := session.Query(fmt.Sprintf(`
+		CREATE OR REPLACE FUNCTION gocql_test.%s ( state tuple<int,bigint> )
 		CALLED ON NULL INPUT
 		RETURNS double
 		LANGUAGE java AS
 		$$double r = 0; if (state.getInt(0) == 0) return null; r = state.getLong(1); r/= state.getInt(0); return Double.valueOf(r);$$
-	`).Exec(); err != nil {
+	`, fnFinal)).Exec(); err != nil {
 		t.Fatalf("failed to create function with err: %v", err)
 	}
 }
 
 func createAggregate(t *testing.T, session *Session) {
+	fnState := testTableName(t, "avgstate")
+	fnFinal := testTableName(t, "avgfinal")
+	aggName := testTableName(t, "average")
+	aggName2 := testTableName(t, "average2")
 	createFunctions(t, session)
-	if err := session.Query(`
-		CREATE OR REPLACE AGGREGATE gocql_test.average(int)
-		SFUNC avgState
+	if err := session.Query(fmt.Sprintf(`
+		CREATE OR REPLACE AGGREGATE gocql_test.%s(int)
+		SFUNC %s
 		STYPE tuple<int,bigint>
-		FINALFUNC avgFinal
+		FINALFUNC %s
 		INITCOND (0,0);
-	`).Exec(); err != nil {
+	`, aggName, fnState, fnFinal)).Exec(); err != nil {
 		t.Fatalf("failed to create aggregate with err: %v", err)
 	}
-	if err := session.Query(`
-		CREATE OR REPLACE AGGREGATE gocql_test.average2(int)
-		SFUNC avgState
+	if err := session.Query(fmt.Sprintf(`
+		CREATE OR REPLACE AGGREGATE gocql_test.%s(int)
+		SFUNC %s
 		STYPE tuple<int,bigint>
-		FINALFUNC avgFinal
+		FINALFUNC %s
 		INITCOND (0,0);
-	`).Exec(); err != nil {
+	`, aggName2, fnState, fnFinal)).Exec(); err != nil {
 		t.Fatalf("failed to create aggregate with err: %v", err)
 	}
+}
+
+const maxCQLIdentifierLen = 48
+const testTableNameHashLen = 16
+
+// testTableName builds a CQL-safe table name from t.Name() and optional parts.
+// Truncates to 48 chars (CQL limit) using <first-n>_<fnv64a hash>_<last-n>
+// when needed.
+func testTableName(t testing.TB, parts ...string) string {
+	name := strings.ToLower(t.Name())
+	for _, p := range parts {
+		name += "_" + strings.ToLower(p)
+	}
+
+	var b strings.Builder
+	prevUnderscore := false
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevUnderscore = false
+		} else if !prevUnderscore {
+			b.WriteByte('_')
+			prevUnderscore = true
+		}
+	}
+	name = strings.Trim(b.String(), "_")
+
+	if len(name) > maxCQLIdentifierLen {
+		h := fnv.New64a()
+		h.Write([]byte(name))
+		hash := fmt.Sprintf("%016x", h.Sum64()) // 16 hex chars for better collision resistance
+		remaining := maxCQLIdentifierLen - testTableNameHashLen - 2
+		prefixLen := remaining / 2
+		suffixLen := remaining - prefixLen
+		name = name[:prefixLen] + "_" + hash + "_" + name[len(name)-suffixLen:]
+	}
+	return name
+}
+
+// testTypeName builds a CQL-safe UDT type name from t.Name() and optional parts.
+// Analogous to testTableName but intended for CREATE TYPE / frozen<type> references.
+func testTypeName(t testing.TB, parts ...string) string {
+	return testTableName(t, parts...)
+}
+
+// testKeyspaceName builds a CQL-safe keyspace name from t.Name() and optional parts.
+// Analogous to testTableName but intended for CREATE/DROP KEYSPACE statements.
+func testKeyspaceName(t testing.TB, parts ...string) string {
+	return testTableName(t, parts...)
 }
 
 func staticAddressTranslator(newAddr net.IP, newPort int) AddressTranslator {
 	return AddressTranslatorFunc(func(addr net.IP, port int) (net.IP, int) {
 		return newAddr, newPort
 	})
+}
+
+func assertDeepEqual(t *testing.T, description string, expected, actual interface{}) {
+	t.Helper()
+	if !reflect.DeepEqual(expected, actual) {
+		t.Fatalf("expected %s to be (%#v) but was (%#v) instead", description, expected, actual)
+	}
+}
+
+// get returns the cache entry for key, or false when there is none. Tests only,
+// as of this commit: the driver's own paths reach the cache through
+// execIfMissing, evictPreparedID and updateMetadataIfSame, each of which takes
+// the lock itself.
+//
+// It lives in this file, which carries no build tag, because its callers do not
+// share one — cassandra_test.go is `integration` while prepared_cache_test.go is
+// `unit`, and TEST_INTEGRATION_TAGS does not include `unit`. Defining it in
+// either tagged file would break the other build.
+func (p *preparedLRU) get(key stmtCacheKey) (*inflightPrepare, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	val, ok := p.lru.Get(key)
+	if !ok {
+		return nil, false
+	}
+
+	ifp, ok := val.(*inflightPrepare)
+	if !ok {
+		return nil, false
+	}
+
+	return ifp, true
 }

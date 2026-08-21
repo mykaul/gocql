@@ -11,6 +11,10 @@ import (
 	"github.com/gocql/gocql/events"
 )
 
+// WARNING: This test must NOT use t.Parallel(). It listens for schema events
+// and concurrent DDL from parallel tests could cause spurious matches.
+//
+//nolint:paralleltest // listens for schema events from the global control connection
 func TestSessionEventBusReceivesSchemaChangeEvent(t *testing.T) {
 	cluster := createCluster()
 	cluster.Events.DisableSchemaEvents = false
@@ -21,12 +25,18 @@ func TestSessionEventBusReceivesSchemaChangeEvent(t *testing.T) {
 	}
 	defer sess.Close()
 
+	keyspace := fmt.Sprintf("eventbus_schema_%d", time.Now().UnixNano())
+
+	// Filter events to the specific keyspace this test creates, so that
+	// concurrent DDL from parallel tests does not cause spurious matches.
 	sub := sess.SubscribeToEvents("schema-event", 10, func(ev events.Event) bool {
-		return ev.Type() == events.ClusterEventTypeSchemaChangeKeyspace
+		if ks, ok := ev.(*events.SchemaChangeKeyspaceEvent); ok {
+			return ks.Keyspace == keyspace
+		}
+		return false
 	})
 	defer sub.Stop()
 
-	keyspace := fmt.Sprintf("eventbus_schema_%d", time.Now().UnixNano())
 	createStmt := fmt.Sprintf(`CREATE KEYSPACE %s WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}`, keyspace)
 	if err := sess.Query(createStmt).Exec(); err != nil {
 		t.Fatalf("create keyspace: %v", err)
@@ -44,6 +54,8 @@ func TestSessionEventBusReceivesSchemaChangeEvent(t *testing.T) {
 }
 
 func TestSessionEventBusReceivesControlReconnectEvent(t *testing.T) {
+	t.Parallel()
+
 	cluster := createCluster()
 	cluster.Events.DisableTopologyEvents = true
 	cluster.Events.DisableNodeStatusEvents = true

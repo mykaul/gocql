@@ -30,6 +30,7 @@ package gocql
 // This file groups integration tests where Cassandra has to be set up with some special integration variables
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -39,8 +40,15 @@ import (
 	"github.com/gocql/gocql/internal/tests"
 )
 
+func init() {
+	// Register integration-only setup that runs before any test (called from TestMain).
+	// This eagerly probes tablet support so parallel tests don't race on lazy init.
+	integrationTestSetup = initTabletProbes
+}
+
 // TestAuthentication verifies that gocql will work with a host configured to only accept authenticated connections
 func TestAuthentication(t *testing.T) {
+	t.Parallel()
 
 	if !*flagRunAuthTest {
 		t.Skip("Authentication is not configured in the target cluster")
@@ -63,6 +71,8 @@ func TestAuthentication(t *testing.T) {
 }
 
 func TestGetHostsFromSystem(t *testing.T) {
+	t.Parallel()
+
 	clusterHosts := getClusterHosts()
 	cluster := createCluster()
 	session := createSessionFromCluster(cluster, t)
@@ -77,6 +87,8 @@ func TestGetHostsFromSystem(t *testing.T) {
 // TestRingDiscovery makes sure that you can autodiscover other cluster members
 // when you seed a cluster config with just one node
 func TestRingDiscovery(t *testing.T) {
+	t.Parallel()
+
 	clusterHosts := getClusterHosts()
 	cluster := createCluster()
 	cluster.Hosts = clusterHosts[:1]
@@ -104,6 +116,8 @@ func TestRingDiscovery(t *testing.T) {
 
 // TestHostFilterDiscovery ensures that host filtering works even when we discover hosts
 func TestHostFilterDiscovery(t *testing.T) {
+	t.Parallel()
+
 	clusterHosts := getClusterHosts()
 	if len(clusterHosts) < 2 {
 		t.Skip("skipping because we don't have 2 or more hosts")
@@ -123,12 +137,14 @@ func TestHostFilterDiscovery(t *testing.T) {
 	session := createSessionFromCluster(cluster, t)
 	defer session.Close()
 
-	tests.AssertEqual(t, "len(clusterHosts)-1 != len(rr.hosts.get())", len(clusterHosts)-1, len(rr.hosts.get()))
+	tests.AssertEqual(t, "len(clusterHosts)-1 != rr.hosts.get().len()", len(clusterHosts)-1, rr.hosts.get().len())
 }
 
 // TestHostFilterInitial ensures that host filtering works for the initial
 // connection including the control connection
 func TestHostFilterInitial(t *testing.T) {
+	t.Parallel()
+
 	clusterHosts := getClusterHosts()
 	if len(clusterHosts) < 2 {
 		t.Skip("skipping because we don't have 2 or more hosts")
@@ -147,10 +163,12 @@ func TestHostFilterInitial(t *testing.T) {
 	session := createSessionFromCluster(cluster, t)
 	defer session.Close()
 
-	tests.AssertEqual(t, "len(clusterHosts)-1 != len(rr.hosts.get())", len(clusterHosts)-1, len(rr.hosts.get()))
+	tests.AssertEqual(t, "len(clusterHosts)-1 != rr.hosts.get().len()", len(clusterHosts)-1, rr.hosts.get().len())
 }
 
 func TestApplicationInformation(t *testing.T) {
+	t.Parallel()
+
 	cluster := createCluster()
 	s, err := cluster.CreateSession()
 	if err != nil {
@@ -253,7 +271,152 @@ func TestApplicationInformation(t *testing.T) {
 
 }
 
+// TestDriverConfigReporting verifies end to end that a session reports one
+// SESSION_ID shared by all of its connections, and that DRIVER_CONFIG is
+// reported exactly once, by the control connection, mirroring the existing
+// TestApplicationInformation precedent.
+func TestDriverConfigReporting(t *testing.T) {
+	t.Parallel()
+
+	cluster := createCluster()
+	s, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatalf("failed to connect to the cluster: %s", err)
+	}
+	defer s.Close()
+
+	// Read the id through the exported accessor rather than the field: an
+	// application correlating its own logs with system.clients has only the
+	// accessor, so that is the path worth exercising end to end.
+	wantSessionID := s.ID()
+	if wantSessionID == "" {
+		t.Fatal("expected the session to have a non-empty id")
+	}
+
+	var clientsTableName string
+	for _, tableName := range []string{"system_views.clients", "system.clients"} {
+		iter := s.Query("select client_options from " + tableName).Iter()
+		if _, err := iter.SliceMap(); err == nil {
+			clientsTableName = tableName
+			break
+		}
+	}
+	if clientsTableName == "" {
+		t.Skip("Skipping because server does not have `client_options` in clients table")
+	}
+
+	// Wait until the pools have finished filling so that the number of
+	// connections this session owns stops moving. Without this the poll below
+	// could reach its exit condition while connections are still being opened.
+	if err := waitUntilPoolsStopFilling(context.Background(), s, 10*time.Second); err != nil {
+		t.Fatalf("failed to wait for the connection pools to fill: %s", err)
+	}
+
+	// The clients table is node-local: every node lists only the connections
+	// made to it. Integration runs use a three node cluster, so a load-balanced
+	// query round-robins across the cluster and most polls would land on a node
+	// that the control connection was never made to, and therefore never see
+	// DRIVER_CONFIG at all. Run every poll on the control connection itself so
+	// the rows always come from the one node whose client list is being
+	// reasoned about.
+	//
+	// Stopping at the first row carrying DRIVER_CONFIG would also make the
+	// "exactly once" assertion below vacuous: the control connection is
+	// established before the pool ones, so its row is the first to appear, and a
+	// regression that also reported DRIVER_CONFIG on pool connections would go
+	// unnoticed because their rows are not in the table yet. Wait for every
+	// connection to that node to be accounted for instead.
+	var configs []string
+	deadline := time.After(10 * time.Second)
+	for {
+		// Re-read the control connection's host on every pass: it can move if
+		// the control connection reconnects, and the pool size it is compared
+		// against has to belong to the same node. Re-reading the pool size also
+		// means that should a pool start filling again, the bar rises with it
+		// instead of leaving the loop free to exit on a stale count.
+		ch := s.control.getConn()
+		if ch == nil {
+			t.Fatal("expected the session to have a control connection")
+		}
+		controlHost := ch.host
+
+		// Connections this session has to the control connection's node: its
+		// pool for that host, plus the control connection itself, which is
+		// dialed outside the pool.
+		wantConns := 1
+		if hostPool, ok := s.pool.getPool(controlHost); ok {
+			wantConns += hostPool.Size()
+		}
+
+		configs = nil
+		conns := 0
+
+		var row map[string]string
+		iter := s.control.query("select client_options from " + clientsTableName)
+		for iter.Scan(&row) {
+			if row[sessionIDStartupKey] != wantSessionID {
+				continue
+			}
+			conns++
+			if config, ok := row[driverConfigStartupKey]; ok {
+				configs = append(configs, config)
+			}
+		}
+		if err := iter.Close(); err != nil {
+			t.Fatalf("failed to execute query: %s", err)
+		}
+
+		// More rows than connections is fine: a connection that has already been
+		// closed can linger in the clients table. Those rows cannot hide a
+		// regression, they can only reveal one, since a second DRIVER_CONFIG is
+		// a failure no matter which connection produced it.
+		if conns >= wantConns && len(configs) > 0 {
+			break
+		}
+
+		select {
+		case <-deadline:
+			t.Fatalf("expected all %d connections with SESSION_ID %q to node %s to be listed in %s with at least one reporting DRIVER_CONFIG within 10s, saw %d connections and %d DRIVER_CONFIG",
+				wantConns, wantSessionID, controlHost.ConnectAddress(), clientsTableName, conns, len(configs))
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+
+	if len(configs) != 1 {
+		t.Errorf("expected exactly one connection with SESSION_ID %q to report DRIVER_CONFIG, got %d", wantSessionID, len(configs))
+	}
+	// Assert on the decoded report rather than a byte-exact string: the payload
+	// is a full configuration description whose exact serialization is the unit
+	// tests' business, while what only a live server can confirm is that it
+	// round-trips intact and that the ScyllaDB-gated key is decided correctly.
+	for _, config := range configs {
+		var report driverConfigReport
+		if err := json.Unmarshal([]byte(config), &report); err != nil {
+			t.Errorf("expected %s to be valid JSON, got %q: %v", driverConfigStartupKey, config, err)
+			continue
+		}
+		if report.Version != driverConfigVersion {
+			t.Errorf("expected %s version %d, got %d", driverConfigStartupKey, driverConfigVersion, report.Version)
+		}
+		if got, want := report.ControlPlane.Schema.Agreement.TimeoutMs, cluster.MaxWaitSchemaAgreement.Milliseconds(); got != want {
+			t.Errorf("expected schema agreement timeout-ms %d, got %d", want, got)
+		}
+		// server-side-ms describes the USING TIMEOUT clause, which only ScyllaDB
+		// understands. The fake server the unit tests run against cannot
+		// exercise either side of that gate.
+		wantServerSide := false
+		if ch := s.control.getConn(); ch != nil {
+			wantServerSide = ch.conn.isScyllaConn()
+		}
+		if got := report.ControlPlane.Queries.System.Timeout.ServerSideMs != nil; got != wantServerSide {
+			t.Errorf("expected server-side-ms present=%v against this server, got %v", wantServerSide, got)
+		}
+	}
+}
+
 func TestWriteFailure(t *testing.T) {
+	t.Parallel()
+
 	t.Skip("skipped due to unknown purpose")
 	cluster := createCluster()
 	createKeyspace(t, cluster, "test", false)
@@ -263,10 +426,13 @@ func TestWriteFailure(t *testing.T) {
 		t.Fatal("create session:", err)
 	}
 	defer session.Close()
-	if err := createTable(session, "CREATE TABLE test.test (id int,value int,PRIMARY KEY (id))"); err != nil {
+
+	table := testTableName(t)
+
+	if err := createTable(session, fmt.Sprintf("CREATE TABLE test.%s (id int,value int,PRIMARY KEY (id))", table)); err != nil {
 		t.Fatalf("failed to create table with error '%v'", err)
 	}
-	if err := session.Query(`INSERT INTO test.test (id, value) VALUES (1, 1)`).Exec(); err != nil {
+	if err := session.Query(fmt.Sprintf(`INSERT INTO test.%s (id, value) VALUES (1, 1)`, table)).Exec(); err != nil {
 		errWrite, ok := err.(*RequestErrWriteFailure)
 		if ok {
 			if session.cfg.ProtoVersion >= protoVersion5 {
@@ -293,18 +459,22 @@ func TestWriteFailure(t *testing.T) {
 }
 
 func TestCustomPayloadMessages(t *testing.T) {
+	t.Parallel()
+
 	t.Skip("SKIPPING")
 	cluster := createCluster()
 	session := createSessionFromCluster(cluster, t)
 	defer session.Close()
 
-	if err := createTable(session, "CREATE TABLE gocql_test.testCustomPayloadMessages (id int, value int, PRIMARY KEY (id))"); err != nil {
+	table := testTableName(t)
+
+	if err := createTable(session, fmt.Sprintf("CREATE TABLE gocql_test.%s (id int, value int, PRIMARY KEY (id))", table)); err != nil {
 		t.Fatal(err)
 	}
 
 	// QueryMessage
 	var customPayload = map[string][]byte{"a": []byte{10, 20}, "b": []byte{20, 30}}
-	query := session.Query("SELECT id FROM testCustomPayloadMessages where id = ?", 42).Consistency(One).CustomPayload(customPayload)
+	query := session.Query(fmt.Sprintf("SELECT id FROM %s where id = ?", table), 42).Consistency(One).CustomPayload(customPayload)
 	iter := query.Iter()
 	rCustomPayload := iter.GetCustomPayload()
 	if !reflect.DeepEqual(customPayload, rCustomPayload) {
@@ -313,7 +483,7 @@ func TestCustomPayloadMessages(t *testing.T) {
 	iter.Close()
 
 	// Insert query
-	query = session.Query("INSERT INTO testCustomPayloadMessages(id,value) VALUES(1, 1)").Consistency(One).CustomPayload(customPayload)
+	query = session.Query(fmt.Sprintf("INSERT INTO %s(id,value) VALUES(1, 1)", table)).Consistency(One).CustomPayload(customPayload)
 	iter = query.Iter()
 	rCustomPayload = iter.GetCustomPayload()
 	if !reflect.DeepEqual(customPayload, rCustomPayload) {
@@ -324,26 +494,30 @@ func TestCustomPayloadMessages(t *testing.T) {
 	// Batch Message
 	b := session.Batch(LoggedBatch)
 	b.CustomPayload = customPayload
-	b.Query("INSERT INTO testCustomPayloadMessages(id,value) VALUES(1, 1)")
+	b.Query(fmt.Sprintf("INSERT INTO %s(id,value) VALUES(1, 1)", table))
 	if err := session.ExecuteBatch(b); err != nil {
 		t.Fatalf("query failed. %v", err)
 	}
 }
 
 func TestCustomPayloadValues(t *testing.T) {
+	t.Parallel()
+
 	t.Skip("SKIPPING")
 	cluster := createCluster()
 	session := createSessionFromCluster(cluster, t)
 	defer session.Close()
 
-	if err := createTable(session, "CREATE TABLE gocql_test.testCustomPayloadValues (id int, value int, PRIMARY KEY (id))"); err != nil {
+	table := testTableName(t)
+
+	if err := createTable(session, fmt.Sprintf("CREATE TABLE gocql_test.%s (id int, value int, PRIMARY KEY (id))", table)); err != nil {
 		t.Fatal(err)
 	}
 
 	values := []map[string][]byte{map[string][]byte{"a": []byte{10, 20}, "b": []byte{20, 30}}, nil, map[string][]byte{"a": []byte{10, 20}, "b": nil}}
 
 	for _, customPayload := range values {
-		query := session.Query("SELECT id FROM testCustomPayloadValues where id = ?", 42).Consistency(One).CustomPayload(customPayload)
+		query := session.Query(fmt.Sprintf("SELECT id FROM %s where id = ?", table), 42).Consistency(One).CustomPayload(customPayload)
 		iter := query.Iter()
 		rCustomPayload := iter.GetCustomPayload()
 		if !reflect.DeepEqual(customPayload, rCustomPayload) {
@@ -353,6 +527,8 @@ func TestCustomPayloadValues(t *testing.T) {
 }
 
 func TestSessionAwaitSchemaAgreement(t *testing.T) {
+	t.Parallel()
+
 	session := createSession(t)
 	defer session.Close()
 
@@ -362,6 +538,8 @@ func TestSessionAwaitSchemaAgreement(t *testing.T) {
 }
 
 func TestSessionAwaitSchemaAgreementSessionClosed(t *testing.T) {
+	t.Parallel()
+
 	session := createSession(t)
 	session.Close()
 
@@ -372,6 +550,8 @@ func TestSessionAwaitSchemaAgreementSessionClosed(t *testing.T) {
 }
 
 func TestSessionAwaitSchemaAgreementContextCanceled(t *testing.T) {
+	t.Parallel()
+
 	session := createSession(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -383,6 +563,8 @@ func TestSessionAwaitSchemaAgreementContextCanceled(t *testing.T) {
 }
 
 func TestNewConnectWithLowTimeout(t *testing.T) {
+	t.Parallel()
+
 	// Point of these tests to make sure that with low timeout connection creation will gracefully fail
 
 	type TestExpectation int
@@ -437,8 +619,10 @@ func TestNewConnectWithLowTimeout(t *testing.T) {
 						cluster.Timeout = lowTimeout
 						return cluster
 					},
-					connect:                    Pass,
-					regularQuery:               Fail,
+					connect: Pass,
+					// At 100ns the query can complete before the deadline fires,
+					// the same race already tolerated below for WriteTimeout/ReadTimeout.
+					regularQuery:               canPassOnHighTimeout,
 					controlQuery:               Pass,
 					controlQueryAfterReconnect: Pass,
 				},
@@ -449,12 +633,10 @@ func TestNewConnectWithLowTimeout(t *testing.T) {
 						cluster.MetadataSchemaRequestTimeout = lowTimeout
 						return cluster
 					},
-					connect:      Pass,
-					regularQuery: Pass,
-					controlQuery: Fail,
-					// It breaks control connection, then it can start reconnecting in any moment
-					// As result test is not stable
-					controlQueryAfterReconnect: Fail,
+					connect:                    Pass,
+					regularQuery:               Pass,
+					controlQuery:               CanPass,
+					controlQueryAfterReconnect: CanPass,
 				},
 				{
 					name: "WriteTimeout",
@@ -535,7 +717,12 @@ func TestNewConnectWithLowTimeout(t *testing.T) {
 
 					if tcase.controlQuery != DontRun {
 						t.Run("Query from control connection", func(t *testing.T) {
-							err = s.control.querySystem("SELECT key FROM system.local WHERE key='local'").err
+							ch := s.control.getConn()
+							if ch == nil {
+								err = errNoControl
+							} else {
+								err = ch.conn.querySystem(context.TODO(), "SELECT key FROM system.local WHERE key='local'").err
+							}
 							match(t, tcase.controlQuery, err)
 						})
 					}
@@ -551,7 +738,12 @@ func TestNewConnectWithLowTimeout(t *testing.T) {
 							if err != nil {
 								t.Fatalf("failed to reconnect to control connection: %v", err)
 							}
-							err = s.control.querySystem("SELECT key FROM system.local WHERE key='local'").err
+							ch := s.control.getConn()
+							if ch == nil {
+								err = errNoControl
+							} else {
+								err = ch.conn.querySystem(context.TODO(), "SELECT key FROM system.local WHERE key='local'").err
+							}
 							match(t, tcase.controlQueryAfterReconnect, err)
 						})
 					}

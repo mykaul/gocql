@@ -20,7 +20,7 @@ func TestGetClusterPeerInfoZeroToken(t *testing.T) {
 
 	schema_version1 := ParseUUIDMust("af810386-a694-11ef-81fa-3aea73156247")
 
-	peersRows := []map[string]interface{}{
+	peersRows := []map[string]any{
 		{
 			"data_center":     "datacenter1",
 			"host_id":         ParseUUIDMust("b2035fd9-e0ca-4857-8c45-e63c00fb7c43"),
@@ -93,22 +93,15 @@ func (*mockConnection) exec(ctx context.Context, req frameBuilder, tracer Tracer
 }
 func (*mockConnection) awaitSchemaAgreement(ctx context.Context) error     { return nil }
 func (*mockConnection) executeQuery(ctx context.Context, qry *Query) *Iter { return nil }
+func (*mockConnection) executeQueryWithMetrics(context.Context, *Query, *queryMetrics) *Iter {
+	return nil
+}
 
 var systemLocalResultMetadata = resultMetadata{
 	flags:          0,
 	pagingState:    []byte{},
-	actualColCount: 18,
+	actualColCount: 11,
 	columns: []ColumnInfo{{
-		Keyspace: "system",
-		Table:    "local",
-		Name:     "key",
-		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
-	}, {
-		Keyspace: "system",
-		Table:    "local",
-		Name:     "bootstrapped",
-		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
-	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "broadcast_address",
@@ -121,18 +114,8 @@ var systemLocalResultMetadata = resultMetadata{
 	}, {
 		Keyspace: "system",
 		Table:    "local",
-		Name:     "cql_version",
-		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
-	}, {
-		Keyspace: "system",
-		Table:    "local",
 		Name:     "data_center",
 		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
-	}, {
-		Keyspace: "system",
-		Table:    "local",
-		Name:     "gossip_generation",
-		TypeInfo: NativeType{proto: protoVersion4, typ: TypeInt},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
@@ -143,11 +126,6 @@ var systemLocalResultMetadata = resultMetadata{
 		Table:    "local",
 		Name:     "listen_address",
 		TypeInfo: NativeType{proto: protoVersion4, typ: TypeInet},
-	}, {
-		Keyspace: "system",
-		Table:    "local",
-		Name:     "native_protocol_version",
-		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
@@ -176,25 +154,10 @@ var systemLocalResultMetadata = resultMetadata{
 	}, {
 		Keyspace: "system",
 		Table:    "local",
-		Name:     "supported_features",
-		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
-	}, {
-		Keyspace: "system",
-		Table:    "local",
 		Name:     "tokens",
 		TypeInfo: CollectionType{
 			NativeType: NativeType{proto: protoVersion4, typ: TypeSet},
 			Elem:       NativeType{proto: protoVersion4, typ: TypeVarchar},
-		},
-	}, {
-		Keyspace: "system",
-		Table:    "local",
-		Name:     "truncated_at",
-		TypeInfo: CollectionType{
-			NativeType: NativeType{proto: protoVersion4, typ: TypeMap},
-
-			Key:  NativeType{proto: protoVersion4, typ: TypeUUID},
-			Elem: NativeType{proto: protoVersion4, typ: TypeBlob},
 		},
 	}},
 }
@@ -202,55 +165,50 @@ var systemLocalResultMetadata = resultMetadata{
 var systemPeersResultMetadata = resultMetadata{
 	flags:          0,
 	pagingState:    []byte{},
-	actualColCount: 10,
+	actualColCount: 9,
 	columns: []ColumnInfo{{
 		Keyspace: "system",
-		Table:    "local",
+		Table:    "peers",
 		Name:     "peer",
 		TypeInfo: NativeType{proto: protoVersion4, typ: TypeInet},
 	}, {
 		Keyspace: "system",
-		Table:    "local",
+		Table:    "peers",
 		Name:     "data_center",
 		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
-		Table:    "local",
+		Table:    "peers",
 		Name:     "host_id",
 		TypeInfo: NativeType{proto: protoVersion4, typ: TypeUUID},
 	}, {
 		Keyspace: "system",
-		Table:    "local",
+		Table:    "peers",
 		Name:     "preferred_ip",
 		TypeInfo: NativeType{proto: protoVersion4, typ: TypeInet},
 	}, {
 		Keyspace: "system",
-		Table:    "local",
+		Table:    "peers",
 		Name:     "rack",
 		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
-		Table:    "local",
+		Table:    "peers",
 		Name:     "release_version",
 		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
-		Table:    "local",
+		Table:    "peers",
 		Name:     "rpc_address",
 		TypeInfo: NativeType{proto: protoVersion4, typ: TypeInet},
 	}, {
 		Keyspace: "system",
-		Table:    "local",
+		Table:    "peers",
 		Name:     "schema_version",
 		TypeInfo: NativeType{proto: protoVersion4, typ: TypeUUID},
 	}, {
 		Keyspace: "system",
-		Table:    "local",
-		Name:     "supported_features",
-		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
-	}, {
-		Keyspace: "system",
-		Table:    "local",
+		Table:    "peers",
 		Name:     "tokens",
 		TypeInfo: CollectionType{
 			NativeType: NativeType{proto: protoVersion4, typ: TypeSet},
@@ -259,19 +217,23 @@ var systemPeersResultMetadata = resultMetadata{
 	}},
 }
 
-func (*mockConnection) querySystem(ctx context.Context, query string, values ...interface{}) *Iter {
-	localData := []interface{}{"local", "COMPLETED", net.IPv4(192, 168, 100, 12), "", "3.3.1", "datacenter1", 1733834239, ParseUUIDMust("045859a7-6b9f-4efd-a5e7-acd64a295e13"), net.IPv4(192, 168, 100, 12), "4", "org.apache.cassandra.dht.Murmur3Partitioner", "rack1", "3.0.8", net.IPv4(192, 168, 100, 12), ParseUUIDMust("daf4df2c-b708-11ef-5c25-3004361afd71"), "", []string{}, map[UUID]byte{}}
-	peerData1 := []interface{}{net.IPv4(192, 168, 100, 13), "datacenter1", ParseUUIDMust("b953309f-6e68-41f2-baf5-0e60da317a9c"), net.IP{}, "rack1", "3.0.8", net.IPv4(192, 168, 100, 13), ParseUUIDMust("b6ed5bde-b318-11ef-8f58-aeba19e31273"), "", []string{"-1032311531684407545", "-1112089412567859825"}}
-	peerData2 := []interface{}{net.IPv4(192, 168, 100, 14), "datacenter1", ParseUUIDMust("8269e111-ea38-44bd-a73f-9d3d12cfaf78"), net.IP{}, "rack1", "3.0.8", net.IPv4(192, 168, 100, 14), ParseUUIDMust("b6ed5bde-b318-11ef-8f58-aeba19e31273"), "", []string{}}
+func (*mockConnection) querySystem(ctx context.Context, query string, values ...any) *Iter {
+	// Column order matches the explicit SELECT in qrySystemLocal:
+	// broadcast_address, cluster_name, data_center, host_id, listen_address, partitioner, rack, release_version, rpc_address, schema_version, tokens
+	localData := []any{net.IPv4(192, 168, 100, 12), "", "datacenter1", ParseUUIDMust("045859a7-6b9f-4efd-a5e7-acd64a295e13"), net.IPv4(192, 168, 100, 12), "org.apache.cassandra.dht.Murmur3Partitioner", "rack1", "3.0.8", net.IPv4(192, 168, 100, 12), ParseUUIDMust("daf4df2c-b708-11ef-5c25-3004361afd71"), []string{}}
+	// Column order matches the explicit SELECT in qrySystemPeersCassandra:
+	// peer, data_center, host_id, preferred_ip, rack, release_version, rpc_address, schema_version, tokens
+	peerData1 := []any{net.IPv4(192, 168, 100, 13), "datacenter1", ParseUUIDMust("b953309f-6e68-41f2-baf5-0e60da317a9c"), net.IP{}, "rack1", "3.0.8", net.IPv4(192, 168, 100, 13), ParseUUIDMust("b6ed5bde-b318-11ef-8f58-aeba19e31273"), []string{"-1032311531684407545", "-1112089412567859825"}}
+	peerData2 := []any{net.IPv4(192, 168, 100, 14), "datacenter1", ParseUUIDMust("8269e111-ea38-44bd-a73f-9d3d12cfaf78"), net.IP{}, "rack1", "3.0.8", net.IPv4(192, 168, 100, 14), ParseUUIDMust("b6ed5bde-b318-11ef-8f58-aeba19e31273"), []string{}}
 
-	if query == "SELECT * FROM system.local WHERE key='local'" {
+	if query == qrySystemLocal {
 		return &Iter{
 			meta:    systemLocalResultMetadata,
 			framer:  &mock.MockFramer{Data: marshalMetadataMust(systemLocalResultMetadata, localData)},
 			numRows: 1,
 			next:    nil,
 		}
-	} else if query == "SELECT * FROM system.peers" {
+	} else if query == qrySystemPeersCassandra {
 		return &Iter{
 			meta:    systemPeersResultMetadata,
 			framer:  &mock.MockFramer{Data: append(marshalMetadataMust(systemPeersResultMetadata, peerData1), marshalMetadataMust(systemPeersResultMetadata, peerData2)...)},
@@ -284,13 +246,14 @@ func (*mockConnection) querySystem(ctx context.Context, query string, values ...
 
 func (*mockConnection) getIsSchemaV2() bool { return false }
 func (*mockConnection) setSchemaV2(s bool)  {}
+func (*mockConnection) isScyllaConn() bool  { return false }
 func (*mockConnection) getScyllaSupported() ScyllaConnectionFeatures {
 	return ScyllaConnectionFeatures{}
 }
 
 type mockControlConn struct{}
 
-func (m *mockControlConn) querySystem(statement string, values ...interface{}) (iter *Iter) {
+func (m *mockControlConn) querySystem(statement string, values ...any) (iter *Iter) {
 	return nil
 }
 
@@ -305,14 +268,14 @@ func (m *mockControlConn) getConn() *connHost {
 	}
 }
 
-func (m *mockControlConn) awaitSchemaAgreement() error                                { return nil }
-func (m *mockControlConn) query(statement string, values ...interface{}) (iter *Iter) { return nil }
-func (m *mockControlConn) discoverProtocol(hosts []*HostInfo) (int, error)            { return 0, nil }
-func (m *mockControlConn) connect(hosts []*HostInfo) error                            { return nil }
-func (m *mockControlConn) close()                                                     {}
-func (m *mockControlConn) getSession() *Session                                       { return nil }
+func (m *mockControlConn) awaitSchemaAgreement() error                        { return nil }
+func (m *mockControlConn) query(statement string, values ...any) (iter *Iter) { return nil }
+func (m *mockControlConn) discoverProtocol(hosts []*HostInfo) (int, error)    { return 0, nil }
+func (m *mockControlConn) connect(hosts []*HostInfo) error                    { return nil }
+func (m *mockControlConn) close()                                             {}
+func (m *mockControlConn) getSession() *Session                               { return nil }
 
-func marshalMetadataMust(metadata resultMetadata, data []interface{}) [][]byte {
+func marshalMetadataMust(metadata resultMetadata, data []any) [][]byte {
 	if len(metadata.columns) != len(data) {
 		panic("metadata length mismatch")
 	}
@@ -326,6 +289,33 @@ func marshalMetadataMust(metadata resultMetadata, data []interface{}) [][]byte {
 		}
 	}
 	return res
+}
+
+type trackingRingConnection struct {
+	iter      *Iter
+	schemaV2  bool
+	scylla    bool
+	lastQuery string
+}
+
+func (*trackingRingConnection) Close() {}
+func (*trackingRingConnection) exec(context.Context, frameBuilder, Tracer, time.Duration) (*framer, error) {
+	return nil, nil
+}
+func (*trackingRingConnection) awaitSchemaAgreement(context.Context) error { return nil }
+func (*trackingRingConnection) executeQuery(context.Context, *Query) *Iter { return nil }
+func (*trackingRingConnection) executeQueryWithMetrics(context.Context, *Query, *queryMetrics) *Iter {
+	return nil
+}
+func (c *trackingRingConnection) querySystem(_ context.Context, q string, _ ...any) *Iter {
+	c.lastQuery = q
+	return c.iter
+}
+func (c *trackingRingConnection) getIsSchemaV2() bool { return c.schemaV2 }
+func (*trackingRingConnection) setSchemaV2(bool)      {}
+func (c *trackingRingConnection) isScyllaConn() bool  { return c.scylla }
+func (*trackingRingConnection) getScyllaSupported() ScyllaConnectionFeatures {
+	return ScyllaConnectionFeatures{}
 }
 
 func TestMockGetHostsFromSystem(t *testing.T) {
@@ -343,12 +333,79 @@ func TestMockGetHostsFromSystem(t *testing.T) {
 	tests.AssertEqual(t, "host token length", 2, len(hosts[0].tokens))
 }
 
+func TestRingDescriberGetClusterPeerInfoClosesIter(t *testing.T) {
+	t.Parallel()
+
+	row := []any{
+		net.IPv4(192, 168, 100, 13),
+		"datacenter1",
+		ParseUUIDMust("b953309f-6e68-41f2-baf5-0e60da317a9c"),
+		net.IP{},
+		"rack1",
+		"3.0.8",
+		net.IPv4(192, 168, 100, 13),
+		ParseUUIDMust("b6ed5bde-b318-11ef-8f58-aeba19e31273"),
+		[]string{"-1032311531684407545"},
+	}
+	framer := &trackingMockFramer{
+		MockFramer: mock.MockFramer{Data: marshalMetadataMust(systemPeersResultMetadata, row)},
+	}
+	r := &ringDescriber{cfg: &ClusterConfig{}}
+
+	peers, err := r.getClusterPeerInfo(context.Background(), &trackingRingConnection{
+		iter: &Iter{
+			meta:    systemPeersResultMetadata,
+			framer:  framer,
+			numRows: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(peers) != 1 {
+		t.Fatalf("expected 1 peer, got %d", len(peers))
+	}
+	if !framer.released {
+		t.Fatal("expected iterator framer to be released")
+	}
+}
+
+func TestGetClusterPeerInfoQueryRouting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		schemaV2  bool
+		scylla    bool
+		wantQuery string
+	}{
+		{"schema_v2", true, false, qrySystemPeersV2},
+		{"scylla_peers", false, true, qrySystemPeers},
+		{"cassandra_peers", false, false, qrySystemPeersCassandra},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &trackingRingConnection{
+				schemaV2: tt.schemaV2,
+				scylla:   tt.scylla,
+			}
+			r := &ringDescriber{cfg: &ClusterConfig{}}
+			// iter is nil so getClusterPeerInfo returns errNoControl, but the query is still recorded
+			_, _ = r.getClusterPeerInfo(context.Background(), conn)
+			if conn.lastQuery != tt.wantQuery {
+				t.Errorf("got query %q, want %q", conn.lastQuery, tt.wantQuery)
+			}
+		})
+	}
+}
+
 func TestRing_AddHostIfMissing_Missing(t *testing.T) {
 	t.Parallel()
 
 	ring := &ringDescriber{}
 
-	host := &HostInfo{hostId: MustRandomUUID().String(), connectAddress: net.IPv4(1, 1, 1, 1)}
+	host := &HostInfo{hostId: MustRandomUUID(), connectAddress: net.IPv4(1, 1, 1, 1)}
 	h1, ok := ring.addHostIfMissing(host)
 	if ok {
 		t.Fatal("host was reported as already existing")
@@ -364,7 +421,7 @@ func TestRing_AddHostIfMissing_Existing(t *testing.T) {
 
 	ring := &ringDescriber{}
 
-	host := &HostInfo{hostId: MustRandomUUID().String(), connectAddress: net.IPv4(1, 1, 1, 1)}
+	host := &HostInfo{hostId: MustRandomUUID(), connectAddress: net.IPv4(1, 1, 1, 1)}
 	ring.addHostIfMissing(host)
 
 	h2 := &HostInfo{hostId: host.hostId, connectAddress: net.IPv4(2, 2, 2, 2)}

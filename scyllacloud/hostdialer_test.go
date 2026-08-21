@@ -112,7 +112,7 @@ func TestHostSNIDialer_InvalidConnectionConfig(t *testing.T) {
 			hostInfo: func() *gocql.HostInfo {
 				hi := gocql.HostInfoBuilder{
 					DataCenter: "unknown-datacenter",
-					HostId:     "host-id",
+					HostId:     "a0000000-0000-0000-0000-000000000099",
 				}.Build()
 				return &hi
 			}(),
@@ -170,13 +170,13 @@ func TestHostSNIDialer_ServerNameIdentifiers(t *testing.T) {
 			hostInfo: func() *gocql.HostInfo {
 				hi := gocql.HostInfoBuilder{
 					DataCenter: "us-east-1",
-					HostId:     "host-1-uuid",
+					HostId:     "a0000000-0000-0000-0000-000000000001",
 				}.Build()
 				return &hi
 			}(),
 			connConfig: newBasicConnectionConf,
 			expectedSNI: func(_ *ConnectionConfig) string {
-				return "host-1-uuid.node.scylladb.com"
+				return "a0000000-0000-0000-0000-000000000001.node.scylladb.com"
 			},
 		},
 	}
@@ -189,7 +189,7 @@ func TestHostSNIDialer_ServerNameIdentifiers(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 			defer cancel()
 
-			server, serverCertPem, clientCertPem, clientKeyPem, err := setupTLSServer([]string{"host-1-uuid.node.scylladb.com", "node.scylladb.com"})
+			server, serverCertPem, clientCertPem, clientKeyPem, err := setupTLSServer([]string{"a0000000-0000-0000-0000-000000000001.node.scylladb.com", "node.scylladb.com"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -340,7 +340,7 @@ func generateSerialNumber() (*big.Int, error) {
 	return serialNumber, nil
 }
 
-func generateSelfSignedX509Certificate(cn string, extKeyUsage []x509.ExtKeyUsage, dnsNames []string, pub, priv interface{}) (*x509.Certificate, error) {
+func generateSelfSignedX509Certificate(cn string, extKeyUsage []x509.ExtKeyUsage, dnsNames []string, pub, priv any) (*x509.Certificate, error) {
 	now := time.Now()
 
 	serialNumber, err := generateSerialNumber()

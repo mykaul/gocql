@@ -65,12 +65,36 @@ func (h tokenRingReplicas) replicasFor(t Token) *hostTokens {
 	return &h[p]
 }
 
+// replicasForInt64 is replicasFor specialized for an already-unboxed int64Token,
+// avoiding a Token-interface comparison on every token-aware routing decision.
+func (h tokenRingReplicas) replicasForInt64(t int64Token) *hostTokens {
+	if len(h) == 0 {
+		return nil
+	}
+
+	p := sort.Search(len(h), func(i int) bool {
+		if ht, ok := h[i].token.(int64Token); ok {
+			return ht >= t
+		}
+		// Ring token type differs from int64Token (mismatched partitioner) —
+		// fall back to the boxed comparison, matching replicasFor's panic-or-not parity.
+		return !h[i].token.Less(t)
+	})
+
+	if p >= len(h) {
+		// rollover
+		p = 0
+	}
+
+	return &h[p]
+}
+
 type placementStrategy interface {
 	replicaMap(tokenRing *tokenRing) tokenRingReplicas
 	replicationFactor(dc string) int
 }
 
-func getReplicationFactorFromOpts(val interface{}) (int, error) {
+func getReplicationFactorFromOpts(val any) (int, error) {
 	switch v := val.(type) {
 	case int:
 		if v < 0 {
@@ -108,7 +132,7 @@ func getStrategy(ks *KeyspaceMetadata, logger StdLogger) placementStrategy {
 
 			rf, err := getReplicationFactorFromOpts(rf)
 			if err != nil {
-				logger.Println("parse rf for keyspace %q, dc %q: %v", err)
+				logger.Printf("parse rf for keyspace %q, dc %q: %v", ks.Name, dc, err)
 				// skip DC if the rf is invalid/unsupported, so that we can at least work with other working DCs.
 				continue
 			}
@@ -119,7 +143,7 @@ func getStrategy(ks *KeyspaceMetadata, logger StdLogger) placementStrategy {
 	case strings.Contains(ks.StrategyClass, "LocalStrategy"):
 		return nil
 	default:
-		logger.Printf("parse rf for keyspace %q: unsupported strategy class: %v", ks.StrategyClass)
+		logger.Printf("parse rf for keyspace %q: unsupported strategy class: %v", ks.Name, ks.StrategyClass)
 		return nil
 	}
 }

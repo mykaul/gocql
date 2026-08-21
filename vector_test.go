@@ -52,6 +52,8 @@ func (p person) String() string {
 }
 
 func TestVector_Marshaler(t *testing.T) {
+	t.Parallel()
+
 	session := createSession(t)
 	defer session.Close()
 
@@ -63,23 +65,26 @@ func TestVector_Marshaler(t *testing.T) {
 		t.Skip("Vector types have been introduced in ScyllaDB 2025.3")
 	}
 
-	err := createTable(session, `CREATE TABLE IF NOT EXISTS gocql_test.vector_fixed(id int primary key, vec vector<float, 3>);`)
+	fixedTable := testTableName(t, "fixed")
+	variableTable := testTableName(t, "variable")
+
+	err := createTable(session, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS gocql_test.%s(id int primary key, vec vector<float, 3>);`, fixedTable))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = createTable(session, `CREATE TABLE IF NOT EXISTS gocql_test.vector_variable(id int primary key, vec vector<text, 4>);`)
+	err = createTable(session, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS gocql_test.%s(id int primary key, vec vector<text, 4>);`, variableTable))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	insertFixVec := []float32{8, 2.5, -5.0}
-	err = session.Query("INSERT INTO vector_fixed(id, vec) VALUES(?, ?)", 1, insertFixVec).Exec()
+	err = session.Query(fmt.Sprintf("INSERT INTO %s(id, vec) VALUES(?, ?)", fixedTable), 1, insertFixVec).Exec()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var selectFixVec []float32
-	err = session.Query("SELECT vec FROM vector_fixed WHERE id = ?", 1).Scan(&selectFixVec)
+	err = session.Query(fmt.Sprintf("SELECT vec FROM %s WHERE id = ?", fixedTable), 1).Scan(&selectFixVec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,12 +92,12 @@ func TestVector_Marshaler(t *testing.T) {
 
 	longText := tests.RandomText(500)
 	insertVarVec := []string{"apache", "cassandra", longText, "gocql"}
-	err = session.Query("INSERT INTO vector_variable(id, vec) VALUES(?, ?)", 1, insertVarVec).Exec()
+	err = session.Query(fmt.Sprintf("INSERT INTO %s(id, vec) VALUES(?, ?)", variableTable), 1, insertVarVec).Exec()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var selectVarVec []string
-	err = session.Query("SELECT vec FROM vector_variable WHERE id = ?", 1).Scan(&selectVarVec)
+	err = session.Query(fmt.Sprintf("SELECT vec FROM %s WHERE id = ?", variableTable), 1).Scan(&selectVarVec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,6 +105,8 @@ func TestVector_Marshaler(t *testing.T) {
 }
 
 func TestVector_Types(t *testing.T) {
+	t.Parallel()
+
 	session := createSession(t)
 	defer session.Close()
 
@@ -138,8 +145,8 @@ func TestVector_Types(t *testing.T) {
 	testCases := []struct {
 		name       string
 		cqlType    string
-		value      interface{}
-		comparator func(*testing.T, interface{}, interface{})
+		value      any
+		comparator func(*testing.T, any, any)
 	}{
 		{name: "ascii", cqlType: TypeAscii.String(), value: []string{"a", "1", "Z"}},
 		{name: "bigint", cqlType: TypeBigInt.String(), value: []int64{1, 2, 3}},
@@ -160,7 +167,7 @@ func TestVector_Types(t *testing.T) {
 			name:    "inet",
 			cqlType: TypeInet.String(),
 			value:   []net.IP{net.IPv4(127, 0, 0, 1), net.IPv4(192, 168, 1, 1), net.IPv4(8, 8, 8, 8)},
-			comparator: func(t *testing.T, e interface{}, a interface{}) {
+			comparator: func(t *testing.T, e any, a any) {
 				expected := e.([]net.IP)
 				actual := a.([]net.IP)
 				tests.AssertEqual(t, "vector size", len(expected), len(actual))
@@ -183,7 +190,7 @@ func TestVector_Types(t *testing.T) {
 				{{2, 3}, {2, -1}, {3}, {0}, {-1.3}},
 				{{1, 1000.0}, {0}, {}, {12, 14, 15, 16}, {-1.3}},
 			},
-			comparator: func(t *testing.T, e interface{}, a interface{}) {
+			comparator: func(t *testing.T, e any, a any) {
 				expected := e.([][][]float32)
 				actual := a.([][][]float32)
 				tests.AssertEqual(t, "vector size", len(expected), len(actual))
@@ -201,13 +208,13 @@ func TestVector_Types(t *testing.T) {
 				}
 			},
 		},
-		{name: "vector_tuple_text_int_float", cqlType: "tuple<text, int, float>", value: [][]interface{}{{"a", 1, float32(0.5)}, {"b", 2, float32(-1.2)}, {"c", 3, float32(0)}}},
-		{name: "vector_tuple_text_list_text", cqlType: "tuple<text, list<text>>", value: [][]interface{}{{"a", []string{"b", "c"}}, {"d", []string{"e", "g", "f"}}, {"h", []string{"i"}}}},
+		{name: "vector_tuple_text_int_float", cqlType: "tuple<text, int, float>", value: [][]any{{"a", 1, float32(0.5)}, {"b", 2, float32(-1.2)}, {"c", 3, float32(0)}}},
+		{name: "vector_tuple_text_list_text", cqlType: "tuple<text, list<text>>", value: [][]any{{"a", []string{"b", "c"}}, {"d", []string{"e", "g", "f"}}, {"h", []string{"i"}}}},
 		{
 			name:    "vector_set_text",
 			cqlType: "set<text>",
 			value:   [][]string{{"a", "b"}, {"c", "d"}, {"f", "e"}},
-			comparator: func(t *testing.T, e interface{}, a interface{}) {
+			comparator: func(t *testing.T, e any, a any) {
 				expected := e.([][]string)
 				actual := a.([][]string)
 				tests.AssertEqual(t, "vector size", len(expected), len(actual))
@@ -224,21 +231,30 @@ func TestVector_Types(t *testing.T) {
 		{name: "vector_map_text_int", cqlType: "map<text, int>", value: []map[string]int{map1, map2, map3}},
 	}
 
+	// Create a single table with one column per test case to reduce schema
+	// change pressure (rapid CREATE TABLE statements can destabilize nodes
+	// in resource-constrained CI environments, see scylladb#739).
+	tableName := testTableName(t, "all_types")
+	var cols string
+	for _, tc := range testCases {
+		cols += fmt.Sprintf(", vec_%s vector<%s, 3>", tc.name, tc.cqlType)
+	}
+	err := createTable(session, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS gocql_test.%s(id int primary key%s);`, tableName, cols))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	for _, test := range testCases {
 		t.Run(test.name, func(t *testing.T) {
-			tableName := fmt.Sprintf("vector_%s", test.name)
-			err := createTable(session, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS gocql_test.%s(id int primary key, vec vector<%s, 3>);`, tableName, test.cqlType))
-			if err != nil {
-				t.Fatal(err)
-			}
+			colName := "vec_" + test.name
 
-			err = session.Query(fmt.Sprintf("INSERT INTO %s(id, vec) VALUES(?, ?)", tableName), 1, test.value).Exec()
+			err := session.Query(fmt.Sprintf("INSERT INTO %s(id, %s) VALUES(?, ?)", tableName, colName), 1, test.value).Exec()
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			v := reflect.New(reflect.TypeOf(test.value))
-			err = session.Query(fmt.Sprintf("SELECT vec FROM %s WHERE id = ?", tableName), 1).Scan(v.Interface())
+			err = session.Query(fmt.Sprintf("SELECT %s FROM %s WHERE id = ?", colName, tableName), 1).Scan(v.Interface())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -252,6 +268,8 @@ func TestVector_Types(t *testing.T) {
 }
 
 func TestVector_MarshalerUDT(t *testing.T) {
+	t.Parallel()
+
 	session := createSession(t)
 	defer session.Close()
 
@@ -263,19 +281,22 @@ func TestVector_MarshalerUDT(t *testing.T) {
 		t.Skip("Vector types have been introduced in ScyllaDB 2025.3")
 	}
 
-	err := createTable(session, `CREATE TYPE gocql_test.person(
+	table := testTableName(t)
+	typeName := testTypeName(t)
+
+	err := createTable(session, fmt.Sprintf(`CREATE TYPE gocql_test.%s(
 		first_name text,
 		last_name text,
-		age int);`)
+		age int);`, typeName))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = createTable(session, `CREATE TABLE gocql_test.vector_relatives(
+	err = createTable(session, fmt.Sprintf(`CREATE TABLE gocql_test.%s(
 		id int,
-		couple vector<person, 2>,
+		couple vector<%s, 2>,
 		primary key(id)
-	);`)
+	);`, table, typeName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,14 +305,14 @@ func TestVector_MarshalerUDT(t *testing.T) {
 	p2 := person{"Capitan", "Planet", 5}
 	insVec := []person{p1, p2}
 
-	err = session.Query("INSERT INTO vector_relatives(id, couple) VALUES(?, ?)", 1, insVec).Exec()
+	err = session.Query(fmt.Sprintf("INSERT INTO %s(id, couple) VALUES(?, ?)", table), 1, insVec).Exec()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var selVec []person
 
-	err = session.Query("SELECT couple FROM vector_relatives WHERE id = ?", 1).Scan(&selVec)
+	err = session.Query(fmt.Sprintf("SELECT couple FROM %s WHERE id = ?", table), 1).Scan(&selVec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,6 +321,8 @@ func TestVector_MarshalerUDT(t *testing.T) {
 }
 
 func TestVector_Empty(t *testing.T) {
+	t.Parallel()
+
 	session := createSession(t)
 	defer session.Close()
 
@@ -311,33 +334,36 @@ func TestVector_Empty(t *testing.T) {
 		t.Skip("Vector types have been introduced in ScyllaDB 2025.3")
 	}
 
-	err := createTable(session, `CREATE TABLE IF NOT EXISTS gocql_test.vector_fixed_null(id int primary key, vec vector<float, 3>);`)
+	fixedTable := testTableName(t, "fixed")
+	variableTable := testTableName(t, "variable")
+
+	err := createTable(session, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS gocql_test.%s(id int primary key, vec vector<float, 3>);`, fixedTable))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = createTable(session, `CREATE TABLE IF NOT EXISTS gocql_test.vector_variable_null(id int primary key, vec vector<text, 4>);`)
+	err = createTable(session, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS gocql_test.%s(id int primary key, vec vector<text, 4>);`, variableTable))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = session.Query("INSERT INTO vector_fixed_null(id) VALUES(?)", 1).Exec()
+	err = session.Query(fmt.Sprintf("INSERT INTO %s(id) VALUES(?)", fixedTable), 1).Exec()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var selectFixVec []float32
-	err = session.Query("SELECT vec FROM vector_fixed_null WHERE id = ?", 1).Scan(&selectFixVec)
+	err = session.Query(fmt.Sprintf("SELECT vec FROM %s WHERE id = ?", fixedTable), 1).Scan(&selectFixVec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tests.AssertTrue(t, "fixed size element vector is empty", selectFixVec == nil)
 
-	err = session.Query("INSERT INTO vector_variable_null(id) VALUES(?)", 1).Exec()
+	err = session.Query(fmt.Sprintf("INSERT INTO %s(id) VALUES(?)", variableTable), 1).Exec()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var selectVarVec []string
-	err = session.Query("SELECT vec FROM vector_variable_null WHERE id = ?", 1).Scan(&selectVarVec)
+	err = session.Query(fmt.Sprintf("SELECT vec FROM %s WHERE id = ?", variableTable), 1).Scan(&selectVarVec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,6 +371,8 @@ func TestVector_Empty(t *testing.T) {
 }
 
 func TestVector_MissingDimension(t *testing.T) {
+	t.Parallel()
+
 	session := createSession(t)
 	defer session.Close()
 
@@ -356,19 +384,22 @@ func TestVector_MissingDimension(t *testing.T) {
 		t.Skip("Vector types have been introduced in ScyllaDB 2025.3")
 	}
 
-	err := createTable(session, `CREATE TABLE IF NOT EXISTS gocql_test.vector_fixed(id int primary key, vec vector<float, 3>);`)
+	table := testTableName(t)
+
+	err := createTable(session, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS gocql_test.%s(id int primary key, vec vector<float, 3>);`, table))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = session.Query("INSERT INTO vector_fixed(id, vec) VALUES(?, ?)", 1, []float32{8, -5.0}).Exec()
+	err = session.Query(fmt.Sprintf("INSERT INTO %s(id, vec) VALUES(?, ?)", table), 1, []float32{8, -5.0}).Exec()
 	require.Error(t, err, "expected vector with 3 dimensions, received 2")
 
-	err = session.Query("INSERT INTO vector_fixed(id, vec) VALUES(?, ?)", 1, []float32{8, -5.0, 1, 3}).Exec()
+	err = session.Query(fmt.Sprintf("INSERT INTO %s(id, vec) VALUES(?, ?)", table), 1, []float32{8, -5.0, 1, 3}).Exec()
 	require.Error(t, err, "expected vector with 3 dimensions, received 4")
 }
 
 func TestVector_SubTypeParsing(t *testing.T) {
+	t.Parallel()
 
 	if *flagDistribution == "scylla" && flagCassVersion.Before(2025, 4, 0) {
 		t.Skip("Vector types are useful in ScyllaDB from 2025.4 and on")

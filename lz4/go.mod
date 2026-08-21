@@ -15,17 +15,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-module github.com/gocql/gocql/lz4
+// This module is named github.com/scylladb/gocql/lz4 to match its hosting repository
+// (github.com/scylladb/gocql). Downstream consumers keep the documented import path
+// github.com/gocql/gocql/lz4 and resolve it to this module via a replace directive in
+// their go.mod — the same fork pattern already used for the parent module. See the
+// "Compression" section of the README for the required replace directive.
+module github.com/scylladb/gocql/lz4
 
-go 1.25
+go 1.25.0
 
 require (
-	github.com/pierrec/lz4/v4 v4.1.26
-	github.com/stretchr/testify v1.11.1
+	github.com/pierrec/lz4/v4 v4.1.29
+	github.com/stretchr/testify v1.12.1
 )
 
-require (
-	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
-)
+require go.yaml.in/yaml/v3 v3.0.5 // indirect

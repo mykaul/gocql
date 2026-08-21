@@ -30,7 +30,33 @@ package gocql
 import (
 	"net"
 	"testing"
+
+	frm "github.com/gocql/gocql/internal/frame"
+	"github.com/gocql/gocql/internal/tests/mock"
 )
+
+type trackingMockFramer struct {
+	mock.MockFramer
+	released bool
+}
+
+func (f *trackingMockFramer) Release() {
+	f.released = true
+}
+
+type systemSchemaTestControl struct {
+	iter *Iter
+}
+
+func (*systemSchemaTestControl) getConn() *connHost                        { return nil }
+func (*systemSchemaTestControl) awaitSchemaAgreement() error               { return nil }
+func (*systemSchemaTestControl) query(string, ...any) (iter *Iter)         { return nil }
+func (c *systemSchemaTestControl) querySystem(string, ...any) (iter *Iter) { return c.iter }
+func (*systemSchemaTestControl) discoverProtocol([]*HostInfo) (int, error) { return 0, nil }
+func (*systemSchemaTestControl) connect([]*HostInfo) error                 { return nil }
+func (*systemSchemaTestControl) close()                                    {}
+func (*systemSchemaTestControl) getSession() *Session                      { return nil }
+func (*systemSchemaTestControl) reconnect() error                          { return nil }
 
 func TestUnmarshalCassVersion(t *testing.T) {
 	t.Parallel()
@@ -91,7 +117,7 @@ func TestIsValidPeer(t *testing.T) {
 	host := &HostInfo{
 		rpcAddress: net.ParseIP("0.0.0.0"),
 		rack:       "myRack",
-		hostId:     "0",
+		hostId:     tUUID(1),
 		dataCenter: "datacenter",
 		tokens:     []string{"0", "1"},
 	}
@@ -112,7 +138,7 @@ func TestIsZeroToken(t *testing.T) {
 	host := &HostInfo{
 		rpcAddress: net.ParseIP("0.0.0.0"),
 		rack:       "myRack",
-		hostId:     "0",
+		hostId:     tUUID(1),
 		dataCenter: "datacenter",
 		tokens:     []string{"0", "1"},
 	}
@@ -124,6 +150,93 @@ func TestIsZeroToken(t *testing.T) {
 	host.tokens = []string{}
 	if !isZeroToken(host) {
 		t.Errorf("expected %+v to be a zero-token host", host)
+	}
+}
+
+func TestCheckSystemSchemaClosesIter(t *testing.T) {
+	t.Parallel()
+
+	t.Run("NilIterReturnsNoControl", func(t *testing.T) {
+		ok, err := checkSystemSchema(&systemSchemaTestControl{})
+		if err != errNoControl {
+			t.Fatalf("expected errNoControl, got %v", err)
+		}
+		if ok {
+			t.Fatal("expected system schema v2 detection to fail without a control iterator")
+		}
+	})
+
+	t.Run("Success", func(t *testing.T) {
+		framer := &trackingMockFramer{}
+		ok, err := checkSystemSchema(&systemSchemaTestControl{
+			iter: &Iter{framer: framer},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !ok {
+			t.Fatal("expected system schema v2 detection to succeed")
+		}
+		if !framer.released {
+			t.Fatal("expected iterator framer to be released")
+		}
+	})
+
+	t.Run("SyntaxError", func(t *testing.T) {
+		framer := &trackingMockFramer{}
+		ok, err := checkSystemSchema(&systemSchemaTestControl{
+			iter: &Iter{
+				err:    &frm.ErrorFrame{Code: ErrCodeSyntax},
+				framer: framer,
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ok {
+			t.Fatal("expected schema v2 detection to fall back on syntax error")
+		}
+		if !framer.released {
+			t.Fatal("expected iterator framer to be released")
+		}
+	})
+}
+
+func TestHostInfoFromIterClosesIter(t *testing.T) {
+	t.Parallel()
+
+	// Column order matches systemLocalResultMetadata:
+	// broadcast_address, cluster_name, data_center, host_id, listen_address, partitioner, rack, release_version, rpc_address, schema_version, tokens
+	row := []any{
+		net.IPv4(192, 168, 100, 12),
+		"cluster",
+		"datacenter1",
+		ParseUUIDMust("045859a7-6b9f-4efd-a5e7-acd64a295e13"),
+		net.IPv4(192, 168, 100, 12),
+		"org.apache.cassandra.dht.Murmur3Partitioner",
+		"rack1",
+		"3.0.8",
+		net.IPv4(192, 168, 100, 12),
+		ParseUUIDMust("daf4df2c-b708-11ef-5c25-3004361afd71"),
+		[]string{"1"},
+	}
+	framer := &trackingMockFramer{
+		MockFramer: mock.MockFramer{Data: marshalMetadataMust(systemLocalResultMetadata, row)},
+	}
+
+	host, err := hostInfoFromIter(&Iter{
+		meta:    systemLocalResultMetadata,
+		framer:  framer,
+		numRows: 1,
+	}, 9042)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if host == nil {
+		t.Fatal("expected host info")
+	}
+	if !framer.released {
+		t.Fatal("expected iterator framer to be released")
 	}
 }
 
@@ -374,7 +487,7 @@ func TestHostInfoBuilder(t *testing.T) {
 			t.Parallel()
 
 			builder := HostInfoBuilder{
-				HostId:        "host-123",
+				HostId:        "a0000000-0000-0000-0000-000000000123",
 				DataCenter:    "dc1",
 				Rack:          "rack1",
 				Tokens:        []string{"token1", "token2"},
@@ -567,7 +680,7 @@ func TestHostInfoBuilder(t *testing.T) {
 			builder := HostInfoBuilder{
 				TranslatedAddresses: translatedAddrs,
 				Workload:            "Cassandra",
-				HostId:              "uuid-host-456",
+				HostId:              "b0000000-0000-0000-0000-000000000456",
 				SchemaVersion:       "schema-v2",
 				Hostname:            "cassandra-node.local",
 				ClusterName:         "production-cluster",

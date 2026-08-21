@@ -28,8 +28,14 @@
 package gocql
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
+	"net"
 	"testing"
+	"time"
+
+	"github.com/gocql/gocql/debounce"
 )
 
 func TestSetupTLSConfig(t *testing.T) {
@@ -98,7 +104,7 @@ func TestSetupTLSConfig(t *testing.T) {
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			tlsConfig, err := setupTLSConfig(test.opts)
+			tlsConfig, err := setupTLSConfig(test.opts, &defaultLogger{})
 			if err != nil {
 				t.Fatalf("unexpected error %q", err.Error())
 			}
@@ -106,6 +112,143 @@ func TestSetupTLSConfig(t *testing.T) {
 				t.Fatalf("got %v, but expected %v", tlsConfig.InsecureSkipVerify,
 					test.expectedInsecureSkipVerify)
 			}
+
+			// Verify that VerifyPeerCertificate is set when InsecureSkipVerify is false
+			// and DisableStrictCertificateValidation is false (default)
+			if !tlsConfig.InsecureSkipVerify && tlsConfig.VerifyPeerCertificate == nil {
+				t.Fatal("VerifyPeerCertificate should be set when InsecureSkipVerify is false")
+			}
+			// Verify that VerifyPeerCertificate is not set when InsecureSkipVerify is true
+			if tlsConfig.InsecureSkipVerify && tlsConfig.VerifyPeerCertificate != nil {
+				t.Fatal("VerifyPeerCertificate should not be set when InsecureSkipVerify is true")
+			}
 		})
+	}
+}
+
+// errorConn is a mock net.Conn whose Close returns an error,
+// triggering HandleError via Conn.closeWithError.
+type errorConn struct {
+	net.Conn
+}
+
+func (e errorConn) Close() error {
+	return errors.New("mock close error")
+}
+
+func (e errorConn) SetTimeout(_ time.Duration) {}
+func (e errorConn) GetTimeout() time.Duration  { return 0 }
+
+// setDisarm is required of any reader installed as Conn.r (connReadSource). This
+// mock is never read from, so there is nothing to disarm.
+func (e errorConn) setDisarm(_ bool) {}
+
+// TestHostConnPoolCloseDeadlock verifies that hostConnPool.Close() does not
+// self-deadlock when defaultConnPicker closes connections that trigger
+// HandleError callbacks.
+//
+// Deadlock chain (before fix):
+//
+//	Close() -> connPicker.Close() -> conn.Close() -> HandleError() -> pool.mu.Lock() (DEADLOCK)
+func TestHostConnPoolCloseDeadlock(t *testing.T) {
+	t.Parallel()
+
+	host := &HostInfo{connectAddress: net.ParseIP("127.0.0.1"), port: 9042}
+	session := &Session{
+		cfg: ClusterConfig{
+			NumConns:         2,
+			ConvictionPolicy: &SimpleConvictionPolicy{},
+		},
+		logger: nopLogger{},
+	}
+
+	pool := &hostConnPool{
+		session:    session,
+		host:       host,
+		size:       2,
+		keyspace:   "test",
+		connPicker: nopConnPicker{},
+		logger:     nopLogger{},
+		debouncer:  debounce.NewSimpleDebouncer(),
+	}
+
+	// Build a defaultConnPicker with Conns that trigger HandleError on Close.
+	picker := newDefaultConnPicker(2)
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		conn := &Conn{
+			r:            errorConn{},
+			errorHandler: pool,
+			cancel:       cancel,
+			ctx:          ctx,
+			logger:       nopLogger{},
+		}
+		_ = picker.Put(conn)
+	}
+	pool.connPicker = picker
+
+	// Close must return before timeout; otherwise the pool is deadlocked.
+	done := make(chan struct{})
+	go func() {
+		pool.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success — Close returned without deadlocking.
+	case <-time.After(5 * time.Second):
+		t.Fatal("hostConnPool.Close() deadlocked: timed out after 5 seconds")
+	}
+}
+
+// TestHostConnPoolConnectClosedPoolDoesNotDeadlock verifies that connect's
+// already-closed-pool path does not close a connection while holding pool.mu.
+func TestHostConnPoolConnectClosedPoolDoesNotDeadlock(t *testing.T) {
+	t.Parallel()
+
+	host := &HostInfo{connectAddress: net.ParseIP("127.0.0.1"), port: 9042}
+	session := &Session{
+		cfg: ClusterConfig{
+			NumConns:         1,
+			ConvictionPolicy: &SimpleConvictionPolicy{},
+		},
+		logger: nopLogger{},
+	}
+
+	pool := &hostConnPool{
+		session:    session,
+		host:       host,
+		size:       1,
+		keyspace:   "test",
+		connPicker: nopConnPicker{},
+		logger:     nopLogger{},
+		debouncer:  debounce.NewSimpleDebouncer(),
+		closed:     true,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	conn := &Conn{
+		r:            errorConn{},
+		errorHandler: pool,
+		cancel:       cancel,
+		ctx:          ctx,
+		logger:       nopLogger{},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		pool.mu.Lock()
+		if pool.closed {
+			pool.mu.Unlock()
+			conn.Close()
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("closed-pool connect cleanup deadlocked: timed out after 5 seconds")
 	}
 }

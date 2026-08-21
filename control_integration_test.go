@@ -21,6 +21,8 @@ func (d unixSocketDialer) DialContext(_ context.Context, _, _ string) (net.Conn,
 }
 
 func TestUnixSockets(t *testing.T) {
+	t.Parallel()
+
 	socketFiles := getClusterSocketFile()
 	if len(socketFiles) == 0 {
 		t.Skip("this test needs path to socket file provided into -cluster-socket cli option")
@@ -56,7 +58,7 @@ func TestUnixSockets(t *testing.T) {
 
 	defer sess.Close()
 
-	keyspace := "test1"
+	keyspace := testKeyspaceName(t)
 
 	err = createTable(sess, `DROP KEYSPACE IF EXISTS `+keyspace)
 	if err != nil {
