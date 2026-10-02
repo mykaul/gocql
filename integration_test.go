@@ -600,7 +600,8 @@ func TestNewConnectWithLowTimeout(t *testing.T) {
 
 	for _, lowTimeout := range []time.Duration{1 * time.Nanosecond, 10 * time.Nanosecond, 100 * time.Nanosecond} {
 		canPassOnHighTimeout := Fail
-		if lowTimeout >= 100*time.Nanosecond {
+		// Only 1ns is reliably past the deadline; at 10ns and 100ns a query can still win the race.
+		if lowTimeout > time.Nanosecond {
 			canPassOnHighTimeout = CanPass
 		}
 		t.Run(lowTimeout.String(), func(t *testing.T) {
